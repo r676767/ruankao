@@ -1,0 +1,35 @@
+# Netlify (Hobby) 部署配置 —— 0 元不绑卡，中国可直连 netlify.app
+# Build/Publish 设置完全复用 Vercel 配置（零改前端）
+[build]
+  command = "true"            # no-op（不跑构建脚本，app/ 已经是可部署静态文件）
+  publish = "app"             # 静态文件目录：index.html / app.js / styles.css / data/questions.json
+  # base = ""                 # 仓库根目录
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"    # 支持 ESM imports（lib/*.js），正确 tree-shaking
+  # external_node_modules = ["node-fetch"]  # 如需要可声明
+
+# 关键：前端代码 fetch('/api/sync') 零改 → 内部 rewrite 到 Netlify Functions
+# status=200 = rewrite（不是 301 redirect，URL 保持 /api/*）
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# 安全 + 缓存头
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# API 永远不缓存（实时进度同步）
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Cache-Control = "no-store"
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Methods = "GET, POST, OPTIONS"
+    Access-Control-Allow-Headers = "Content-Type"
