@@ -9,11 +9,26 @@
 const DATA_URL = './data/questions.json';
 const API_SYNC = './api/sync';
 const API_RESET = './api/reset';
+const DATA_LOAD_TIMEOUT_MS = 20000; // 题库加载超时兜底（避免一直转圈）
 
 const LS_KEY = 'ruankao.quiz.progress.v1';
 const LS_LAST = 'ruankao.quiz.last.v1';
 const LS_WRONG = 'ruankao.quiz.wrong.v1';
 const LS_FAV = 'ruankao.quiz.favorite.v1';
+
+/* ----------------- 工具：判断"是否有真实后端 API" ----------------- */
+// 纯静态托管（GitHub Pages、/dist 本地直开等）时，fallback /api/* 请求必然 404，
+// 这种情况下直接跳过 fetch，避免控制台出现红的 404 错误，也避免无意义的网络请求。
+function backendLikelyAvailable() {
+  try {
+    const href = location?.href || '';
+    if (/^file:/i.test(href)) return false;           // file:// 直开：肯定无后端
+    if (/github\.io|pages\.dev|netlify\.app|vercel\.app|onrender\.com/i.test(href)) return false; // 已知纯静态托管
+    if (!/^https?:/i.test(href)) return false;
+    // 其它情况（localhost、自建 Node Web Service）允许尝试
+    return true;
+  } catch { return false; }
+}
 
 /* ----------------- 全局状态 ----------------- */
 const State = {
@@ -145,7 +160,14 @@ async function pullFromServer({ applyRenderIfChanged = false } = {}) {
       data = r.json;
     } else {
       // Fallback：老的后端 API（/api/sync，本地 node server 或 Vercel/Netlify Functions）
+      // —— 纯静态托管下直接跳过（避免 404 红错 + 无意义请求）
+      if (!backendLikelyAvailable()) {
+        return;
+      }
       const res = await fetch(API_SYNC, { method: 'GET', cache: 'no-store' });
+      if (res.status === 404) {
+        return; // 无后端，静默跳过
+      }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       data = await res.json();
     }
@@ -235,11 +257,20 @@ async function pushToServer() {
           if (r.status !== 200 || !r.json?.ok) throw new Error((r.json?.error) || ('cloud sync HTTP ' + (r.status || '?')));
           data = r.json;
         } else {
+          // Fallback：老的后端 API —— 纯静态托管下直接跳过（已经 saveLocal 兜底）
+          if (!backendLikelyAvailable()) {
+            pendingPush = false;
+            break;
+          }
           const res = await fetch(API_SYNC, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json; charset=utf-8' },
             body: JSON.stringify(payload),
           });
+          if (res.status === 404) {
+            pendingPush = false;
+            break; // 无后端，放弃 push（本地已有 saveLocal 兜底）
+          }
           if (!res.ok) throw new Error('HTTP ' + res.status);
           data = await res.json();
         }
@@ -371,12 +402,19 @@ async function notifyReset(ids) {
 
 /* ----------------- 数据加载 & 扁平化 ----------------- */
 async function loadData() {
-  const res = await fetch(DATA_URL, { cache: 'no-cache' });
-  if (!res.ok) throw new Error('加载题库失败：HTTP ' + res.status);
-  const json = await res.json();
-  State.data = json;
-  flattenData(json);
-  State.total = State.flatQuestions.length;
+  // 加 20s 超时兜底，避免题库下载慢/CDN 抖动导致"正在加载题库..."永远转圈
+  const timeoutP = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('题库加载超时，请刷新页面重试（可能是网络慢或 CDN 缓存）')), DATA_LOAD_TIMEOUT_MS);
+  });
+  const loadP = (async () => {
+    const res = await fetch(DATA_URL, { cache: 'no-cache' });
+    if (!res.ok) throw new Error('加载题库失败：HTTP ' + res.status);
+    const json = await res.json();
+    State.data = json;
+    flattenData(json);
+    State.total = State.flatQuestions.length;
+  })();
+  await Promise.race([loadP, timeoutP]);
 }
 
 function flattenData(json) {
@@ -1212,15 +1250,33 @@ async function main() {
   const loader = el('loader');
   try {
     if (loader) loader.hidden = false;
-    // 1) 先尝试从服务端拉用户数据（localStorage 作为兜底）
-    await pullFromServer();
-    // 2) 加载题库
+
+    // ⚠️ 【启动顺序修正，核心修复】
+    // 第 1 优先级：先加载题库 + 立刻渲染首页！
+    //   这样即使云端同步没配置、后端 API 不存在、Gist 连不上，用户也能立刻看到章节列表开始刷题。
+    //   （之前先做 pullFromServer，一旦 404/异常，后面永远不会加载题库）
     await loadData();
-    // 3) 绑定事件 & 渲染
     bindEvents();
     renderHome();
-    // 4) 启动实时自动同步循环：答题/收藏后立即推；每 5s 拉取其他设备的改动
-    startAutoSyncLoop();
+
+    // 第 2 优先级：云端同步（失败完全不影响刷题，所有异常 100% 吞掉）
+    try {
+      await pullFromServer({ applyRenderIfChanged: true });
+    } catch (e) {
+      // 无配置、纯静态、GitHub Pages——这些情况静默即可（已经有 localStorage 兜底）
+      if (window.RuanKaoSync && !window.RuanKaoSync.hasConfigSaved()) {
+        // 用户还没开同步功能，完全正常
+      } else {
+        console.warn('[startup] 首次同步拉取失败，不影响刷题：', e.message);
+      }
+    }
+
+    // 第 3 优先级：启动实时自动同步循环（同样 try-catch 防崩溃）
+    try {
+      startAutoSyncLoop();
+    } catch (e) {
+      console.warn('[startup] 自动同步循环启动失败（仅不支持跨设备）：', e.message);
+    }
   } catch (e) {
     console.error(e);
     const host = location?.host || '';
@@ -1230,15 +1286,17 @@ async function main() {
         <div style="color:#d9656f;font-weight:600">⚠️ 应用启动失败</div>
         <div style="max-width:420px;text-align:center;line-height:1.8;color:#4a5a7a;font-size:14px">
           ${byFile
-            ? `<b>不要用 file:// 直接打开 HTML</b>，否则题库加载会被浏览器安全策略拦截。<br/>请在项目根目录运行：<br/><code style="background:#eef3ff;padding:2px 8px;border-radius:6px">npm run dev</code>`
+            ? `<b>不要用 file:// 直接打开 HTML</b>，否则题库加载会被浏览器安全策略拦截。<br/>请在项目根目录运行：<br/><code style="background:#eef3ff;padding:2px 8px;border-radius:6px">node scripts/server.js</code><br/>或访问上面的公网 GitHub Pages 链接。`
             : `错误原因：<code style="font-size:12px;color:#d9656f">${escapeHtml(e.message || String(e))}</code><br/><br/>
-               请访问 <b>http://${host || 'localhost:8080'}/</b>，或在项目根启动服务：<br/><code style="background:#eef3ff;padding:2px 8px;border-radius:6px">npm run dev</code>`
+               👉 如果显示 "HTTP 404/加载题库失败"：请按 <b>Ctrl+Shift+R</b>（Mac：Cmd+Shift+R）强制刷新跳过缓存。<br/>
+               👉 如果还是不行：直接访问公网地址 <b style="word-break:break-all">https://r676767.github.io/ruankao/</b>`
           }
         </div>
       `;
     }
     return;
   } finally {
+    // 无论成功失败，一定会关闭 loader（绝对不允许永远"正在加载题库..."）
     if (loader) loader.hidden = true;
   }
 }
