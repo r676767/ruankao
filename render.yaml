@@ -1,41 +1,20 @@
-# =====================================================
-#  系规刷题 · 云端部署一键配置
-#
-#  平台：Render.com （推荐，国外老牌，免费额度 750h/月，
-#                    搭配持久磁盘约 $0.25/月，进度永不丢失）
-#
-#  使用方法：
-#  1. 把本项目推到 GitHub 公开仓库（免费）
-#  2. 打开 https://dashboard.render.com/ ，用 GitHub 登录
-#  3. 选「New +」→「Web Service」→ 选中你的仓库
-#  4. Render 会自动识别下方 yaml 配置并全部填好
-#  5. 等 2~3 分钟部署完成，得到一个 https://xxx.onrender.com 公网链接
-#     电脑 + 手机（4G/WiFi 都可以）随时点即访问，进度/错题实时同步
-# =====================================================
+# Render Blueprint (Infrastructure as Code)
+# 使用方法：Render Dashboard → Blueprints → New Blueprint Instance → 选 r676767/ruankao 仓库 → Apply
+# Render 会自动创建 Web Service，并按以下配置构建 & 启动，完全无需手动填 GUI 表单
 services:
   - type: web
-    name: ruankao-quiz
-    env: node
-    repo: https://github.com/your-username/ruankao  # ← 部署到你自己的仓库后，这里会被 Render 自动替换
-    region: singapore                          # ← 亚太离国内近，速度快
-    plan: free                                 # ← 先用免费版（每月750小时，相当于单人个人使用够用）；后面需要更快/不睡眠可升 starter
-    buildCommand: "npm install && echo build-done"
-    startCommand: "npm start"
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: "10000"
-      - key: DATA_DIR
-        value: "/var/data"                    # ← 挂载 Render 的持久磁盘路径；服务器重启也不会丢数据
-      - key: TZ
-        value: "Asia/Shanghai"
+    name: ruankao
+    runtime: node
+    repo: https://github.com/r676767/ruankao
+    branch: main
+    plan: free
+    buildCommand: npm install
+    startCommand: node scripts/server.js
     autoDeploy: yes
-    healthCheckPath: "/"
-    numInstances: 1
-    # 持久磁盘：确保用户进度、错题、收藏在重启/重部署后都不丢
-    # 费用：$0.25/GB/月（1GB 对于一个 userdata.json 绰绰有余，能用数年）
-    disk:
-      name: ruankao-data
-      mountPath: /var/data
-      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: GIST_ID
+        value: fca886b3e1393d79eb9b8d4e6afda25f
+      - key: GH_TOKEN
+        sync: false    # secret: Apply 时在 Render 页面粘贴你的 GitHub PAT (gist scope)，不要写进 YAML
