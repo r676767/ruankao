@@ -137,9 +137,18 @@ function schedulePullLoop() {
 
 async function pullFromServer({ applyRenderIfChanged = false } = {}) {
   try {
-    const res = await fetch(API_SYNC, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
+    let data;
+    // 优先：客户端直接连 Gist（0 后端，跨设备实时）
+    if (window.RuanKaoSync?.isAvailable()) {
+      const r = await window.RuanKaoSync.getSync({ forceReload: true });
+      if (r.status !== 200) throw new Error((r.json?.error) || 'cloud sync HTTP ' + r.status);
+      data = r.json;
+    } else {
+      // Fallback：老的后端 API（/api/sync，本地 node server 或 Vercel/Netlify Functions）
+      const res = await fetch(API_SYNC, { method: 'GET', cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      data = await res.json();
+    }
 
     // 记录 merge 前最新进度时间戳
     let beforeTs = 0;
@@ -193,8 +202,13 @@ async function pullFromServer({ applyRenderIfChanged = false } = {}) {
       }
     }
   } catch (e) {
-    // 拉取失败时不报错给用户，仅依赖 localStorage 兜底
-    console.warn('[sync] 拉取服务端数据失败，使用本地缓存：', e.message);
+    // 拉取失败时不报错给用户，仅依赖 localStorage 兜底（未启用云端同步时也正常，只是 warn 一条）
+    if (window.RuanKaoSync && !window.RuanKaoSync.hasConfigSaved()) {
+      // 根本没配置，不算异常，静默处理
+      void 0;
+    } else {
+      console.warn('[sync] 拉取云端/服务端数据失败，使用本地缓存：', e.message);
+    }
   }
 }
 
@@ -206,24 +220,31 @@ async function pushToServer() {
   try {
     while (pendingPush) {
       pendingPush = false;
-      // 注意：服务端 progress 以 answeredAt 时间戳为权威，所以
-      //   上传完整 progress 集合 → 服务端 merge 后再回传 → 客户端再 merge 回本地
-      // favorites 传成 [id]（后端期望是 string[]）
+      // 注意：云端进度以 answeredAt 时间戳为权威，所以
+      //   上传完整 progress 集合 → （客户端直连时直接 merge）→ 写回 Gist → 客户端再 merge 回本地
+      // favorites 传成 [id]
       const payload = {
         progress: State.progress,
         last: State.last,
         favorites: Array.isArray(State.favorites) ? State.favorites : [],
       };
       try {
-        const res = await fetch(API_SYNC, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        let data;
+        if (window.RuanKaoSync?.isAvailable()) {
+          const r = await window.RuanKaoSync.postSync(payload, { replaceSnapshot: false });
+          if (r.status !== 200 || !r.json?.ok) throw new Error((r.json?.error) || ('cloud sync HTTP ' + (r.status || '?')));
+          data = r.json;
+        } else {
+          const res = await fetch(API_SYNC, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          data = await res.json();
+        }
         if (data && data.ok) {
-          // 服务端合并后版本是权威版本；再 merge 回本地（避免并发拉取导致偏差）
+          // 合并后的版本是权威版本；再 merge 回本地（避免并发拉取导致偏差）
           if (data.progress) State.progress = mergeProgress(State.progress, data.progress);
           if (Array.isArray(data.favorites)) {
             const fset = new Set(data.favorites);
@@ -243,8 +264,13 @@ async function pushToServer() {
           serverVersion = data.version || serverVersion;
         }
       } catch (e) {
+        // 没配置云端同步（无后端 API 也无 Gist 直连）→ 静默跳过 push（已经存本地兜底）
+        if (window.RuanKaoSync && !window.RuanKaoSync.hasConfigSaved()) {
+          // 无需重试（因为本地已有 saveLocal 兜底）
+          pendingPush = false;
+          break;
+        }
         console.warn('[sync] 推送失败（会重试）：', e.message);
-        // 失败则稍后重试
         await new Promise(r => setTimeout(r, 2000));
         pendingPush = true;
       }
@@ -319,9 +345,22 @@ function rebuildWrongFromProgress(progress) {
   return list.filter(x => seen.has(x.id) ? false : (seen.add(x.id), true));
 }
 
-/* ----------------- 重置进度（通知服务端） ----------------- */
+/* ----------------- 重置进度（通知云端 / 直连 Gist） ----------------- */
 async function notifyReset(ids) {
+  // 优先：客户端直接写 Gist（0 后端）
+  let cloudOk = false;
   try {
+    if (window.RuanKaoSync?.isAvailable()) {
+      if (ids && Array.isArray(ids) && ids.length > 0) {
+        await window.RuanKaoSync.patchRemoveIds(ids);
+      } else {
+        await window.RuanKaoSync.postReset({ forceAll: true });
+      }
+      cloudOk = true;
+    }
+  } catch (e) { console.warn('[reset] 云端直连写回失败：', e.message); }
+  // Fallback：老的后端 API（/api/reset，本地 server/Vercel/Netlify Functions）
+  if (!cloudOk) try {
     await fetch(API_RESET, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
@@ -1143,6 +1182,12 @@ function bindEvents() {
         }, 350);
       }
     }
+  });
+
+  // 云端同步设置按钮（⚙️ 右上角齿轮）
+  el('settingsBtn')?.addEventListener('click', () => {
+    if (window.RuanKaoSync) window.RuanKaoSync.openSettingsModal();
+    else alert('☁️ 云端同步模块加载失败，请刷新页面（或检查 gist-client.js 是否加载）。');
   });
 
   // 键盘快捷键（桌面可选）
