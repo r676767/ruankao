@@ -367,6 +367,75 @@
     return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
 
+  /* ---------------- 8. 书签 URL 自动配置（gh_token / gist_id / autoconf hash 传参） ---------------- */
+  function parseHashParams() {
+    const hash = (typeof location !== 'undefined' && location.hash) || '';
+    if (!hash || hash.length < 2) return {};
+    const out = {};
+    for (const part of hash.slice(1).split('&')) {
+      if (!part) continue;
+      const idx = part.indexOf('=');
+      const k = idx === -1 ? part : part.slice(0, idx);
+      const v = idx === -1 ? '' : decodeURIComponent(part.slice(idx + 1).replace(/\+/g, ' '));
+      out[String(k).toLowerCase().trim()] = v;
+    }
+    return out;
+  }
+  function pickParam(params, keys) {
+    for (const k of keys) {
+      const v = params[k.toLowerCase()];
+      if (v != null && v !== '') return v;
+    }
+    return '';
+  }
+  function showTopToast(msg, type = 'info') {
+    if (typeof document === 'undefined') return;
+    const el = document.createElement('div');
+    el.textContent = msg;
+    el.style.cssText = 'position:fixed;z-index:999999;top:14px;left:50%;transform:translateX(-50%);padding:10px 18px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.18);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.4;max-width:92vw;text-align:center;';
+    if (type === 'ok') { el.style.background = '#ecfdf5'; el.style.color = '#065f46'; el.style.border = '1px solid #a7f3d0'; }
+    else if (type === 'err') { el.style.background = '#fef2f2'; el.style.color = '#991b1b'; el.style.border = '1px solid #fecaca'; }
+    else if (type === 'warn') { el.style.background = '#fffbeb'; el.style.color = '#92400e'; el.style.border = '1px solid #fde68a'; }
+    else { el.style.background = '#eff6ff'; el.style.color = '#1e40af'; el.style.border = '1px solid #bfdbfe'; }
+    document.body.appendChild(el);
+    setTimeout(() => { try { el.style.opacity = '0'; el.style.transition = 'opacity .6s'; setTimeout(() => el.remove(), 800); } catch {} }, 4500);
+  }
+  function autoApplyFromURL() {
+    try {
+      const params = parseHashParams();
+      if (!params || Object.keys(params).length === 0) return;
+      const token = pickParam(params, ['gh_token', 'token', 'ghtoken', 'ghToken', 'GH_TOKEN']);
+      const gid = pickParam(params, ['gist_id', 'gistid', 'gistId', 'GIST_ID', 'gist']);
+      if (!token || !gid) return; // 书签里没有完整参数，直接跳过
+      const autoconf = ['1','true','yes','on'].includes(String(pickParam(params,['autoconf','auto','apply','save'])).toLowerCase());
+      ensureModalInDOM();
+      if (autoconf) {
+        // 自动写入 localStorage，打开即进入同步模式
+        saveCfg({ gistId: gid.trim(), ghToken: token.trim() });
+        showTopToast('✅ 书签已自动启用跨设备同步（Gist ' + gid.trim().slice(0, 8) + '…），右上角⚙️可查看/修改', 'ok');
+        // 通知 app.js：配置变了，立即重新拉一次（若 app.js 已初始化了 RuanKaoSync 会在下一轮 pull 里生效，这里主动触发一下）
+        if (typeof window.RKNotifyHashApplied === 'function') try { window.RKNotifyHashApplied(); } catch {}
+        if (typeof window.dispatchEvent === 'function') try { window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: gid.trim() } })); } catch {}
+      } else {
+        // 只预填，用户确认后手动点保存
+        setTimeout(() => {
+          try {
+            document.getElementById('rcGistId').value = gid.trim();
+            document.getElementById('rcGhToken').value = token.trim();
+          } catch {}
+          if (typeof RuanKaoSync !== 'undefined' && RuanKaoSync.openSettingsModal) {
+            RuanKaoSync.openSettingsModal();
+            try {
+              document.getElementById('rcGistId').value = gid.trim();
+              document.getElementById('rcGhToken').value = token.trim();
+            } catch {}
+            showTopToast('💡 书签已自动填入配置，请点【保存并启用】或先【测试连接】确认', 'warn');
+          }
+        }, 300);
+      }
+    } catch (e) { /* 书签解析失败无副作用 */ console.warn('[gist-client] autoApplyFromURL failed:', e); }
+  }
+
   /* ---------------- 7. 初始化全局对象 ---------------- */
   const RuanKaoSync = {
     // --- 能力检测 ---
@@ -382,14 +451,17 @@
     closeSettingsModal() { const m = document.getElementById('rcSyncMask'); if (m) m.hidden = true; const mm = document.getElementById('rcSyncModal'); if (mm) mm.hidden = true; },
     // --- 配置 ---
     loadCfg, saveCfg, clearCfg,
+    // --- 书签解析工具（外部可直接调试）---
+    autoApplyFromURL, parseHashParams,
   };
 
-  // 启动前如果 DOM 已经 ready，先把 Modal 基础闭包绑好
+  // 启动前如果 DOM 已经 ready，先把 Modal 基础闭包绑好，再尝试从 URL 书签自动应用配置
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', ensureModalInDOM, { once: true });
+      document.addEventListener('DOMContentLoaded', function () { ensureModalInDOM(); autoApplyFromURL(); }, { once: true });
     } else {
       ensureModalInDOM();
+      autoApplyFromURL();
     }
   }
 
