@@ -1,0 +1,15 @@
+﻿{
+    "name":  "ruankao-app",
+    "version":  "1.0.0",
+    "type":  "module",
+    "private":  true,
+    "scripts":  {
+                    "parse":  "node scripts/parse-pdf.js",
+                    "dev":  "node scripts/server.js",
+                    "start":  "node scripts/server.js",
+                    "build":  "node scripts/build-single-file.mjs"
+                },
+    "dependencies":  {
+                         "@llamaindex/liteparse":  "*"
+                     }
+}

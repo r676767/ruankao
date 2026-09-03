@@ -1,0 +1,25 @@
+# 大体积原始素材（GitHub 单文件上限 100MB，PDF 553MB 远超限制，禁止上传）
+*.pdf
+
+# 临时文件 / 中间产物
+raw-content.md
+_tmp_*
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 本地用户数据（每个人独立，禁止上传；云端部署使用持久磁盘）
+app/data/userdata.json
+userdata.json
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp

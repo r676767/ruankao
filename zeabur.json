@@ -1,0 +1,32 @@
+{
+  "$schema": "https://openapi.zeabur.com/openapi-v1.schema.json",
+  "name": "ruankao-quiz",
+  "services": [
+    {
+      "name": "ruankao-quiz",
+      "type": "git",
+      "repo": "your-github-username/ruankao",
+      "branch": "main",
+      "rootDirectory": "/",
+      "buildCommand": "npm install",
+      "startCommand": "npm start",
+      "outputDir": "",
+      "template": "node",
+      "env": {
+        "NODE_ENV": "production",
+        "PORT": "8080",
+        "DATA_DIR": "/app/data",
+        "TZ": "Asia/Shanghai"
+      },
+      "ports": [
+        { "port": 8080, "protocol": "http", "public": true }
+      ]
+    },
+    {
+      "name": "ruankao-storage",
+      "type": "volume",
+      "size": "1GB",
+      "mountTarget": "/app/data"
+    }
+  ]
+}

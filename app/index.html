@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <meta name="theme-color" content="#6aa7ff" />
+  <title>系规 · 综合分章节刷题 2026</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部导航 -->
+    <header class="topbar" id="topbar">
+      <button class="icon-btn" id="backBtn" aria-label="返回" hidden>
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M15.4 7.4L14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg>
+      </button>
+      <div class="title-area">
+        <div class="app-title" id="pageTitle">系规分章节题库</div>
+        <div class="app-subtitle" id="pageSubtitle">系统规划与管理师 · 2026有解析版</div>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="favBtn" aria-label="收藏" title="收藏本题" style="display:none">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M22 9.8l-7.2-.6L12 2 9.2 8.6 2 9.2l5.4 4.7L5.8 21 12 17.3 18.2 21l-1.6-7.1L22 9.8zM12 15.2l-3.8 2.3 1-4.4-3.4-3 4.4-.4L12 6l1.8 3.7 4.4.4-3.4 3 1 4.4z"/></svg>
+        </button>
+        <button class="icon-btn" id="resetBtn" aria-label="重置进度" title="重置本节进度">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 页面容器 -->
+    <main class="main">
+      <!-- ============ 章节列表视图 ============ -->
+      <section class="view" id="homeView">
+        <div class="stats-card">
+          <div class="stats-row">
+            <div class="stat">
+              <div class="stat-num" id="totalDone">0</div>
+              <div class="stat-label">已完成</div>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat">
+              <div class="stat-num" id="totalAcc">0%</div>
+              <div class="stat-label">正确率</div>
+            </div>
+            <div class="stat-divider"></div>
+            <div class="stat">
+              <div class="stat-num" id="totalLeft">0</div>
+              <div class="stat-label">待刷</div>
+            </div>
+          </div>
+
+          <!-- 快捷入口：错题本 / 收藏夹 -->
+          <div class="quick-grid">
+            <div class="quick-card" id="wrongBtn">
+              <div class="quick-icon wrong-ic">📕</div>
+              <div class="quick-info">
+                <div class="quick-title">错题本</div>
+                <div class="quick-sub"><b id="wrongCount">0</b> 道待巩固</div>
+              </div>
+              <span class="quick-arrow">›</span>
+            </div>
+            <div class="quick-card" id="favBtnBar">
+              <div class="quick-icon fav-ic">⭐</div>
+              <div class="quick-info">
+                <div class="quick-title">收藏夹</div>
+                <div class="quick-sub"><b id="favCount">0</b> 道收藏</div>
+              </div>
+              <span class="quick-arrow">›</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-label">
+          <span>章节练习</span>
+          <button class="chip-btn" id="continueBtn" hidden>继续上次</button>
+        </div>
+
+        <div class="chapter-list" id="chapterList"></div>
+        <div style="height:32px"></div>
+      </section>
+
+      <!-- ============ 答题视图 ============ -->
+      <section class="view" id="quizView" hidden>
+        <!-- 题目进度条 -->
+        <div class="quiz-progress" id="quizProgress">
+          <div class="quiz-progress-bar" id="quizProgressBar"></div>
+          <div class="quiz-progress-text">
+            <span id="quizIndex">1 / 100</span>
+            <span id="quizRate">正确率 —</span>
+          </div>
+        </div>
+
+        <!-- 题目区 -->
+        <div class="question-card" id="questionCard">
+          <div class="q-tags">
+            <span class="tag tag-source" id="qSource"></span>
+            <span class="tag tag-index" id="qIndexTag">#1</span>
+            <span class="tag tag-type" id="qTypeTag">单选</span>
+          </div>
+          <div class="q-stem" id="qStem"></div>
+          <div class="q-options" id="qOptions"></div>
+        </div>
+
+        <!-- 结果卡片（答题后显示） -->
+        <div class="result-card" id="resultCard" hidden>
+          <div class="result-header" id="resultHeader"></div>
+          <div class="result-my">
+            <span>你的答案</span>
+            <b id="myAnswer">—</b>
+          </div>
+          <div class="result-right">
+            <span>正确答案</span>
+            <b id="rightAnswer">—</b>
+          </div>
+          <div class="analysis-block" id="analysisBlock" hidden>
+            <div class="analysis-title">📘 答案解析</div>
+            <div class="analysis-text" id="analysisText"></div>
+          </div>
+        </div>
+
+        <div style="height:96px"></div>
+      </section>
+
+      <!-- ============ 错题本视图 ============ -->
+      <section class="view" id="wrongView" hidden>
+        <div class="list-toolbar">
+          <button class="chip-btn primary" id="wrongPracticeBtn">练习错题</button>
+          <button class="chip-btn danger" id="wrongClearBtn">清空错题本</button>
+        </div>
+        <div class="list-wrap" id="wrongList"></div>
+      </section>
+
+      <!-- ============ 收藏夹视图 ============ -->
+      <section class="view" id="favoriteView" hidden>
+        <div class="list-wrap" id="favList"></div>
+      </section>
+    </main>
+
+    <!-- 底部操作栏（答题视图） -->
+    <footer class="bottom-bar" id="bottomBar" hidden>
+      <button class="nav-btn" id="prevBtn">
+        <span class="nav-ic">‹</span> 上一题
+      </button>
+      <button class="nav-btn nav-btn-primary" id="submitBtn">
+        提交答案
+      </button>
+      <button class="nav-btn" id="nextBtn">
+        下一题 <span class="nav-ic">›</span>
+      </button>
+      <button class="nav-btn ghost" id="cardBtn">答题卡</button>
+    </footer>
+
+    <!-- 答题卡浮层 -->
+    <div class="sheet-mask" id="sheetMask" hidden></div>
+    <aside class="sheet" id="sheet" hidden>
+      <div class="sheet-header">
+        <div class="sheet-title" id="sheetTitle">答题卡</div>
+        <button class="icon-btn" id="closeSheet" aria-label="关闭">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 6.4L17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+        </button>
+      </div>
+      <div class="sheet-summary" id="sheetSummary"></div>
+      <div class="sheet-grid" id="sheetGrid"></div>
+    </aside>
+
+    <!-- 加载中 -->
+    <div class="loader" id="loader">
+      <div class="spinner"></div>
+      <div>正在加载题库…</div>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
