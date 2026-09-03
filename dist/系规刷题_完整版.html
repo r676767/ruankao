@@ -1,6 +1,6 @@
 <!-- =========================================================
      系规 · 综合分章节刷题 2026（单文件离线版）
-     生成时间：2026/9/3 21:48:24
+     生成时间：2026/9/3 22:17:12
      使用方式：直接双击 / 发送到手机浏览器打开，所有进度保存在
               当前浏览器 localStorage 中；
            或拖到 https://app.netlify.com/drop 获取公开 https 链接。
@@ -726,7 +726,7 @@ button { font-family: inherit; }
             </div>
           </div>
 
-          <!-- 快捷入口：错题本 / 收藏夹 -->
+          <!-- 快捷入口：错题本 / 收藏夹 / 同步 -->
           <div class="quick-grid">
             <div class="quick-card" id="wrongBtn">
               <div class="quick-icon wrong-ic">📕</div>
@@ -741,6 +741,22 @@ button { font-family: inherit; }
               <div class="quick-info">
                 <div class="quick-title">收藏夹</div>
                 <div class="quick-sub"><b id="favCount">0</b> 道收藏</div>
+              </div>
+              <span class="quick-arrow">›</span>
+            </div>
+            <div class="quick-card" id="exportBtn">
+              <div class="quick-icon exp-ic">📤</div>
+              <div class="quick-info">
+                <div class="quick-title">导出进度</div>
+                <div class="quick-sub">生成备份文件，存本地或发给其它设备</div>
+              </div>
+              <span class="quick-arrow">›</span>
+            </div>
+            <div class="quick-card" id="importBtn">
+              <div class="quick-icon imp-ic">📥</div>
+              <div class="quick-info">
+                <div class="quick-title">导入进度</div>
+                <div class="quick-sub">从备份文件恢复，或合并另一台设备的进度</div>
               </div>
               <span class="quick-arrow">›</span>
             </div>
@@ -68303,6 +68319,117 @@ async function resetAll() {
   if (State.current) renderQuiz(); else renderHome();
 }
 
+/* ================= 进度导出 / 导入（跨设备同步） ================= */
+function buildBackup() {
+  // 精简：progress 字段里 answeredAt 毫秒数用 delta 节省体积（可选），这里直接全量即可
+  const done = Object.keys(State.progress).length;
+  let right = 0;
+  for (const r of Object.values(State.progress)) if (r && r.correct) right++;
+  return {
+    app: 'ruankao-quiz',
+    version: 1,
+    exportedAt: Date.now(),
+    total: State.total,
+    done,
+    right,
+    wrong: State.wrong.length,
+    favorites: State.favorites.length,
+    payload: {
+      progress: State.progress,
+      favorites: State.favorites,
+      last: State.last,
+    }
+  };
+}
+
+function validateBackup(obj) {
+  if (!obj || typeof obj !== 'object') return '不是有效的备份文件';
+  if (obj.app !== 'ruankao-quiz') return '文件不是本应用的进度备份';
+  if (obj.version !== 1) return '备份版本不兼容，请用当前版本重新导出';
+  if (!obj.payload || typeof obj.payload !== 'object') return '备份缺少 payload';
+  return null;
+}
+
+function exportProgressToFile() {
+  const backup = buildBackup();
+  const blob = new Blob([JSON.stringify(backup, null, 0)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const name = `系规刷题进度_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  try { a.click(); } catch (e) { console.warn(e); }
+  setTimeout(() => {
+    try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch {}
+  }, 2000);
+  alert(`✅ 已生成备份：${name}\n\n请把这个文件发给另一台设备（微信「文件传输助手」即可），在另一台设备的题库首页点「📥导入进度」即可合并同步。`);
+}
+
+function importProgressFromFile(onDone) {
+  // 复用 input file，避免重复创建
+  let input = document.getElementById('__importProgressInput__');
+  if (!input) {
+    input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.id = '__importProgressInput__';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+  }
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      const err = validateBackup(obj);
+      if (err) { alert('❌ ' + err); return; }
+      applyBackup(obj.payload, file.name);
+      if (typeof onDone === 'function') onDone(obj.payload);
+    } catch (e) {
+      console.error(e);
+      alert('❌ 导入失败：文件内容不是合法的 JSON。请确认导入的是本应用生成的「系规刷题进度_xxx.json」。');
+    }
+  };
+  input.click();
+}
+
+function applyBackup(payload, fileName) {
+  const { progress = {}, favorites = [], last = null } = payload || {};
+  const existingDone = Object.keys(State.progress).length;
+  const incomingDone = Object.keys(progress).length;
+
+  // 策略：mergeProgress（同一题时间戳较新的覆盖） + 收藏合并去重
+  State.progress = mergeProgress(State.progress, progress);
+  const favSet = new Set(State.favorites);
+  for (const id of (favorites || [])) favSet.add(id);
+  State.favorites = Array.from(favSet);
+  // last：如果新导入的更新就用它
+  if (last && (!State.last || ((last.updatedAt || 0) >= (State.last.updatedAt || 0)))) {
+    State.last = last;
+  }
+  State.wrong = rebuildWrongFromProgress(State.progress);
+  saveProgressOnly();
+  saveLast(State.last);
+
+  const newDone = Object.keys(State.progress).length - existingDone;
+  const newFav  = State.favorites.length;
+  const summary =
+    `📥 导入成功\n\n` +
+    `导入文件：${fileName || ''}\n` +
+    `· 导入答题记录：${incomingDone} 条\n` +
+    `· 合并后新增记录：${newDone} 条（时间戳更新的会覆盖旧记录）\n` +
+    `· 当前收藏题数：${newFav} 道\n` +
+    `· 当前错题数：${State.wrong.length} 道\n\n` +
+    `✅ 进度已写入本设备本地存储。如果连了服务端，会自动同步到云端。`;
+  alert(summary);
+  renderHome();
+}
+
 /* ================= save 辅助 ================= */
 function saveProgressOnly() {
   saveLocal(LS_KEY, State.progress);
@@ -68343,6 +68470,9 @@ function bindEvents() {
   el('wrongBtn')?.addEventListener('click', () => switchView('wrong'));
   // 收藏夹入口
   el('favBtnBar')?.addEventListener('click', () => switchView('favorite'));
+  // 导出 / 导入进度
+  el('exportBtn')?.addEventListener('click', exportProgressToFile);
+  el('importBtn')?.addEventListener('click', () => importProgressFromFile());
   // 答题页收藏按钮
   el('favBtn')?.addEventListener('click', () => {
     if (!State.current) return;

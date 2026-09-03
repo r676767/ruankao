@@ -5,26 +5,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
+import { createStorageFromEnv } from '../lib/storage.js';
+import { createQuizApi } from '../lib/quiz-api.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const APP_DIR = path.join(ROOT, 'app');
 
-// 数据目录：支持 DATA_DIR 环境变量（云平台持久磁盘通常挂载在 /var/data 之类的路径）
-// 本地开发默认使用 app/data；若未显式设置但用户数据目录不存在，会自动创建
 const ENV_DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : null;
 const DATA_DIR = ENV_DATA_DIR || path.join(APP_DIR, 'data');
 
-// 题库目录（题目数据是只读文件，在源代码里）
+// 题库目录（只读，在源代码里）
 const QUESTIONS_DIR = path.join(APP_DIR, 'data');
 const QUESTIONS_FILE = path.join(QUESTIONS_DIR, 'questions.json');
 
-// 用户数据文件：放在 DATA_DIR（可以是外部持久磁盘或默认 app/data）
-const USERDATA_FILE = path.join(DATA_DIR, 'userdata.json');
-
 const PORT = Number(process.env.PORT || 8080);
 
-// 确保目录存在
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(QUESTIONS_DIR)) fs.mkdirSync(QUESTIONS_DIR, { recursive: true });
 
@@ -54,49 +51,66 @@ function getLanIPs() {
   return ips;
 }
 
-/* ----------------- 服务端用户数据（跨设备共享） ----------------- */
-function loadUserData() {
-  try {
-    if (fs.existsSync(USERDATA_FILE)) {
-      const raw = fs.readFileSync(USERDATA_FILE, 'utf-8');
-      const obj = JSON.parse(raw);
-      // 兼容旧版
-      if (!obj.progress || typeof obj.progress !== 'object') obj.progress = {};
-      if (!obj.wrong) obj.wrong = [];
-      if (!obj.favorites) obj.favorites = [];
-      if (obj.last == null) obj.last = null;
-      if (!obj.version) obj.version = Date.now();
-      return obj;
+/* ----------------- 选择存储适配器 & 初始化 QuizApi ----------------- */
+const storage = createStorageFromEnv({ dataDir: DATA_DIR });
+
+// 提供 flatQuestionsProvider：在需要按章节重置时才会懒加载
+let _flatQsCache = null;
+async function flatQuestionsProvider() {
+  if (_flatQsCache) return _flatQsCache;
+  const raw = await fs.promises.readFile(QUESTIONS_FILE, 'utf-8');
+  const data = JSON.parse(raw);
+  const list = [];
+  for (const ch of data.chapters || []) {
+    for (const sec of ch.sections || []) {
+      for (const q of sec.questions || []) {
+        list.push({
+          question: { id: q.id },
+          chapter: { id: ch.id },
+          section: { id: sec.id },
+        });
+      }
     }
-  } catch (e) {
-    console.error('[userdata] 读取失败，已重置：', e.message);
   }
-  return { progress: {}, wrong: [], favorites: [], last: null, version: Date.now() };
+  _flatQsCache = list;
+  return list;
 }
 
-function saveUserData(data) {
-  data.version = Date.now();
-  const tmp = USERDATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 0), 'utf-8');
-  fs.renameSync(tmp, USERDATA_FILE);
+/**
+ * 兼容旧前端 body.ids：精确删除指定 questionIds（进度+收藏+错题同时清理）
+ *   调用路径：
+ *     1) api.getSync(forceReload=true) → 从磁盘/存储重读（避免内存过期）
+ *     2) 在最新 state 基础上删除 ids
+ *     3) api.postSync(patch, flushImmediately=true) → patch 到内存并同步写到磁盘
+ *     4) 再次 getSync(forceReload=true) → 重新从磁盘读回来，内存也同步（避免测试脚本再读取时拿到旧内存）
+ */
+async function applyDeleteIds(api, ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return await api.getSync();
+  const { json: g } = await api.getSync({ forceReload: true });
+  const progress = { ...(g.progress || {}) };
+  const favs = new Set(g.favorites || []);
+  for (const id of ids) {
+    delete progress[id];
+    favs.delete(id);
+  }
+  // replaceSnapshot=true：把 progress / favorites 当作最终快照（即使是空集合），不会再被旧 base 合并回来
+  const patched = await api.postSync(
+    { progress, favorites: Array.from(favs), last: g.last },
+    { flushImmediately: true, replaceSnapshot: true }
+  );
+  // 再次 forceReload 以确保内存 snapshot 也与磁盘完全一致
+  await api.getSync({ forceReload: true });
+  return patched;
 }
 
-let userData = loadUserData();
-let saveTimer = null;
-function scheduleSave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    try { saveUserData(userData); }
-    catch (e) { console.error('[userdata] 保存失败：', e.message); }
-  }, 120);
-}
+const api = createQuizApi({ storage, flatQuestionsProvider });
 
+/* ----------------- HTTP 工具 ----------------- */
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    const MAX = 10 * 1024 * 1024; // 10MB 上限
+    const MAX = 10 * 1024 * 1024; // 10MB
     req.on('data', (c) => {
       size += c.length;
       if (size > MAX) { reject(new Error('body too large')); req.destroy(); return; }
@@ -125,40 +139,11 @@ function sendJSON(res, obj, status = 200) {
   res.end(body);
 }
 
-// 空 favicon：返回一个 SVG 图标（避免 404 污染控制台）
 const FAVICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#8bc0ff"/><stop offset="100%" stop-color="#5b98f7"/></linearGradient></defs><circle cx="32" cy="32" r="30" fill="url(#g)"/><text x="32" y="42" text-anchor="middle" font-size="28" font-family="Arial, sans-serif" fill="#ffffff" font-weight="700">Q</text></svg>';
 
-// 合并客户端上传的 progress：对每题取 answeredAt 较新的版本
-function mergeProgress(serverProgress, clientProgress) {
-  if (!clientProgress) return serverProgress;
-  const merged = { ...serverProgress };
-  for (const [qid, rec] of Object.entries(clientProgress)) {
-    if (!rec || typeof rec !== 'object') continue;
-    const prev = merged[qid];
-    if (!prev) { merged[qid] = rec; continue; }
-    const tsPrev = prev.answeredAt || 0;
-    const tsCur = rec.answeredAt || 0;
-    if (tsCur >= tsPrev) merged[qid] = rec;
-  }
-  return merged;
-}
-
-// 重建错题列表：从 progress 扫一遍（权威数据源）
-function rebuildWrongFromProgress(progress) {
-  const list = [];
-  for (const [qid, rec] of Object.entries(progress || {})) {
-    if (rec && rec.my && rec.correct === false) {
-      list.push({ id: qid, answeredAt: rec.answeredAt || Date.now() });
-    }
-  }
-  list.sort((a, b) => b.answeredAt - a.answeredAt);
-  const seen = new Set();
-  return list.filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
-}
-
-function handleAPI(req, res, urlPath) {
-  // CORS 预检
+/* ----------------- API 路由（使用 QuizApi 复用层） ----------------- */
+async function handleAPI(req, res, urlPath) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -170,117 +155,47 @@ function handleAPI(req, res, urlPath) {
     return;
   }
 
-  if (req.method === 'GET' && urlPath === '/api/sync') {
-    sendJSON(res, {
-      progress: userData.progress,
-      wrong: userData.wrong,
-      favorites: userData.favorites,
-      last: userData.last,
-      version: userData.version,
-    });
-    return;
-  }
-
-  if (req.method === 'POST' && urlPath === '/api/sync') {
-    // 客户端把自己的数据推上来；服务端合并并返回最新数据
-    readJsonBody(req)
-      .then((payload) => {
-        // 1) 合并 progress（按 answeredAt 取较新）
-        userData.progress = mergeProgress(userData.progress, payload.progress);
-
-        // 2) 错题：从合并后的 progress 重建（权威数据源）
-        userData.wrong = rebuildWrongFromProgress(userData.progress);
-
-        // 3) 收藏：合并并去重，显式删除的要尊重（客户端以带 removed=true 标记表示移除单项）
-        const favSet = new Set(userData.favorites || []);
-        if (Array.isArray(payload.favorites)) {
-          for (const it of payload.favorites) {
-            if (it && it.id) {
-              if (it.removed) favSet.delete(it.id);
-              else favSet.add(it.id);
-            } else if (typeof it === 'string') {
-              favSet.add(it);
-            }
-          }
-        }
-        userData.favorites = [...favSet];
-
-        // 4) last：以较新者为准
-        const lastTs = userData.last?.updatedAt || 0;
-        const cliTs = payload.last?.updatedAt || 0;
-        if (cliTs >= lastTs && payload.last) {
-          userData.last = payload.last;
-        }
-
-        scheduleSave();
-
-        sendJSON(res, {
-          ok: true,
-          progress: userData.progress,
-          wrong: userData.wrong,
-          favorites: userData.favorites,
-          last: userData.last,
-          version: userData.version,
-        });
-      })
-      .catch((e) => {
-        console.error('[sync] payload 解析失败:', e.message);
-        sendJSON(res, { ok: false, error: 'bad payload' }, 400);
-      });
-    return;
-  }
-
-  // 兼容：独立更新进度（细粒度）
-  if (req.method === 'POST' && urlPath === '/api/progress') {
-    readJsonBody(req).then((payload) => {
-      if (payload && payload.records && typeof payload.records === 'object') {
-        userData.progress = mergeProgress(userData.progress, payload.records);
-        userData.wrong = rebuildWrongFromProgress(userData.progress);
-        scheduleSave();
+  try {
+    if (req.method === 'GET' && urlPath === '/api/sync') {
+      const r = await api.getSync();
+      sendJSON(res, r.json, r.status);
+      return;
+    }
+    if (req.method === 'POST' && urlPath === '/api/sync') {
+      const body = await readJsonBody(req);
+      const r = await api.postSync(body, { flushImmediately: true });
+      sendJSON(res, r.json, r.status);
+      return;
+    }
+    if (req.method === 'POST' && urlPath === '/api/reset') {
+      const body = await readJsonBody(req);
+      if (body && Array.isArray(body.ids) && !body.chapterId && !body.sectionId) {
+        // 旧版精确删除 ids：调用 applyDeleteIds（内部 flushImmediately）
+        const r = await applyDeleteIds(api, body.ids);
+        sendJSON(res, { ok: true, version: r.json.version }, r.status);
+        return;
       }
-      sendJSON(res, { ok: true, version: userData.version });
-    }).catch(() => sendJSON(res, { ok: false }, 400));
-    return;
+      const r = await api.postReset(body || {}, { flushImmediately: true });
+      sendJSON(res, r.json, r.status);
+      return;
+    }
+    sendJSON(res, { error: 'not found' }, 404);
+  } catch (e) {
+    console.error('[handleAPI] uncaught:', e);
+    sendJSON(res, { ok: false, error: e.message || 'server error' }, 500);
   }
-
-  // 清除某节 / 全部进度
-  if (req.method === 'POST' && urlPath === '/api/reset') {
-    readJsonBody(req).then((payload) => {
-      if (payload && payload.ids && Array.isArray(payload.ids)) {
-        // 按 id 列表清除（进度 + 错题 + 收藏）
-        const idSet = new Set(payload.ids);
-        for (const id of idSet) delete userData.progress[id];
-        userData.favorites = (userData.favorites || []).filter(id => !idSet.has(id));
-      } else {
-        // 全部清空
-        userData.progress = {};
-        userData.wrong = [];
-        userData.favorites = [];
-        userData.last = null;
-      }
-      userData.wrong = rebuildWrongFromProgress(userData.progress);
-      scheduleSave();
-      sendJSON(res, { ok: true, version: userData.version });
-    }).catch(() => sendJSON(res, { ok: false }, 400));
-    return;
-  }
-
-  sendJSON(res, { error: 'not found' }, 404);
 }
 
+/* ----------------- 静态资源服务 ----------------- */
 function serveStatic(req, res, urlPath) {
-  // 只允许访问 APP_DIR
   const safePath = path.normalize(path.join(APP_DIR, urlPath)).replace(/^(\.\.(\/|\\|$))+/, '');
   const filePath = path.join(APP_DIR, path.relative(APP_DIR, safePath));
   if (!filePath.startsWith(APP_DIR)) {
     res.writeHead(403); res.end('Forbidden'); return;
   }
-
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) {
-      // 忽略：让浏览器控制台的 404 尽量少；同时保留页面级 404 友好提示
       if (urlPath && !/\.(html|css|js|json|png|jpg|jpeg|svg|ico|webp|woff2?)$/i.test(urlPath)) {
-        // 非静态资源类路径 404 也返回友好提示
         res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<h3 style="text-align:center;margin-top:40px;color:#4d8cf0">404 · Not Found</h3>');
         return;
@@ -303,14 +218,12 @@ const server = http.createServer((req, res) => {
   try {
     const urlPath = decodeURIComponent((req.url || '/').split('?')[0] || '/');
 
-    // Render / 云平台 Health Check
     if (urlPath === '/health' || urlPath === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, ts: Date.now(), version: 1 }));
+      res.end(JSON.stringify({ ok: true, ts: Date.now(), version: 1, storage: storage.kind }));
       return;
     }
 
-    // 特殊路径：favicon / robots
     if (urlPath === '/favicon.ico') {
       res.writeHead(200, {
         'Content-Type': 'image/svg+xml',
@@ -330,13 +243,11 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    // API 路由
     if (urlPath.startsWith('/api/')) {
       handleAPI(req, res, urlPath);
       return;
     }
 
-    // 静态资源
     const servePath = urlPath === '/' ? '/index.html' : urlPath;
     serveStatic(req, res, servePath);
   } catch (e) {
@@ -345,37 +256,56 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  const qCount = (() => {
-    try {
-      if (fs.existsSync(QUESTIONS_FILE)) {
-        const raw = fs.readFileSync(QUESTIONS_FILE, 'utf-8');
-        const obj = JSON.parse(raw);
-        let n = 0;
-        for (const ch of obj.chapters || [])
-          for (const s of ch.sections || []) n += (s.questions || []).length;
-        const chapterN = (obj.chapters || []).length;
-        return { n, chapterN };
-      }
-    } catch {}
-    return { n: 0, chapterN: 0 };
-  })();
+/* ----------------- 启动入口 ----------------- */
+(async function main() {
+  // 启动前先预加载一次 userdata（提前暴露存储错误）
+  try {
+    const r = await api.getSync();
+    console.log(`[init] 存储适配器：${storage.describe()}，记录数=${Object.keys(r.json.progress).length}`);
+  } catch (e) {
+    console.error('[init] 存储加载失败，但仍启动服务：', e.message);
+  }
 
-  console.log('============================================');
-  console.log('  系规刷题应用 已启动 ✅');
-  console.log('============================================');
-  console.log(`  本机访问:   http://localhost:${PORT}`);
-  for (const ip of getLanIPs()) {
-    console.log(`  局域网访问: http://${ip}:${PORT}   （手机同WiFi可用）`);
-  }
-  console.log('--------------------------------------------');
-  console.log(`  数据: ${qCount.n} 道题 · ${qCount.chapterN} 章`);
-  console.log('  进度/错题 已改为 服务端保存，手机/电脑 数据共享');
-  if (ENV_DATA_DIR) {
-    console.log(`  持久数据目录(外部 DATA_DIR): ${DATA_DIR}`);
-  } else {
-    console.log(`  本地数据文件: ${USERDATA_FILE}`);
-  }
-  console.log('  按 Ctrl + C 停止服务');
-  console.log('============================================');
-});
+  // SIGINT / exit 确保最后 flush 一次
+  const onExit = async () => {
+    try { await api._internal.flush(); } catch {}
+    process.exit(0);
+  };
+  process.on('SIGINT', onExit);
+  process.on('SIGTERM', onExit);
+
+  server.listen(PORT, '0.0.0.0', () => {
+    const qCount = (() => {
+      try {
+        if (fs.existsSync(QUESTIONS_FILE)) {
+          const obj = JSON.parse(fs.readFileSync(QUESTIONS_FILE, 'utf-8'));
+          let n = 0, chapterN = 0;
+          for (const ch of obj.chapters || []) {
+            chapterN++;
+            for (const s of ch.sections || []) n += (s.questions || []).length;
+          }
+          return { n, chapterN };
+        }
+      } catch {}
+      return { n: 0, chapterN: 0 };
+    })();
+
+    console.log('============================================');
+    console.log('  系规刷题应用 已启动 ✅');
+    console.log('============================================');
+    console.log(`  本机访问:   http://localhost:${PORT}`);
+    for (const ip of getLanIPs()) {
+      console.log(`  局域网访问: http://${ip}:${PORT}   （手机同WiFi可用）`);
+    }
+    console.log('--------------------------------------------');
+    console.log(`  数据: ${qCount.n} 道题 · ${qCount.chapterN} 章`);
+    console.log(`  存储: ${storage.describe()}`);
+    if (storage.kind === 'file') {
+      console.log('  进度/错题 服务端保存，手机/电脑 数据共享');
+    } else if (storage.kind === 'gist') {
+      console.log('  进度/错题 GitHub Gist 持久化，Vercel 部署重启也不丢（0 元免费实时同步）');
+    }
+    console.log('  按 Ctrl + C 停止服务');
+    console.log('============================================');
+  });
+})().catch(e => { console.error('[main] 启动失败:', e); process.exit(1); });

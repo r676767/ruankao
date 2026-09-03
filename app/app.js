@@ -111,12 +111,44 @@ let syncTimer = null;
 let syncInFlight = false;
 let pendingPush = false;
 let serverVersion = 0;
+let lastServerMergeSnapshot = 0;  // 最近一次从服务端 merge 回来的 version，用于判断是否需要重渲染
 
-async function pullFromServer() {
+// ========= 实时同步：定时 pull + 变更即 push，跨设备自动一致 =========
+let PULL_INTERVAL_MS = 5_000;   // 页面可见时：5 秒拉一次（手机/电脑互相同步的"实时感"）
+let HIDDEN_PULL_MS    = 30_000; // 页面切后台后：30 秒拉一次（省电）
+let pullLoopTimer = null;
+let pullLoopRunning = false;
+let lastAppliedServerProgressTs = 0; // 上次拉取后，progress 里最新 answeredAt（用来检测"是否真有新内容"）
+const AUTO_RENDER_VIEWS = new Set(['home','wrong','favorite']); // 这些视图检测到有新进度就重渲染
+
+async function pullLoopTick() {
+  if (pullLoopRunning) return;
+  pullLoopRunning = true;
+  try { await pullFromServer({ applyRenderIfChanged: true }); }
+  catch { /* ignore */ }
+  finally { pullLoopRunning = false; schedulePullLoop(); }
+}
+function schedulePullLoop() {
+  if (pullLoopTimer) { clearTimeout(pullLoopTimer); pullLoopTimer = null; }
+  const hidden = typeof document !== 'undefined' && document.hidden;
+  const delay = hidden ? HIDDEN_PULL_MS : PULL_INTERVAL_MS;
+  pullLoopTimer = setTimeout(pullLoopTick, delay);
+}
+
+async function pullFromServer({ applyRenderIfChanged = false } = {}) {
   try {
     const res = await fetch(API_SYNC, { method: 'GET', cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+
+    // 记录 merge 前最新进度时间戳
+    let beforeTs = 0;
+    if (applyRenderIfChanged) {
+      for (const rec of Object.values(State.progress || {})) {
+        const t = rec?.answeredAt || 0;
+        if (t > beforeTs) beforeTs = t;
+      }
+    }
 
     // progress：服务端 + 本地合并，按 answeredAt 取较新
     State.progress = mergeProgress(State.progress, data.progress || {});
@@ -126,13 +158,40 @@ async function pullFromServer() {
       const sTs = data.last.updatedAt || 0;
       if (sTs >= lTs) State.last = data.last;
     }
-    // favorites / wrong：直接以服务端为准（但也要合并本地新收藏）
+    // favorites：先合并再去重（两边 union）
     const favSet = new Set(Array.isArray(data.favorites) ? data.favorites : []);
     for (const id of (State.favorites || [])) favSet.add(id);
     State.favorites = [...favSet];
     State.wrong = rebuildWrongFromProgress(State.progress);
 
+    // 本地兜底同步写入（即便之前有 localStorage 老版本，也保证与合并后一致）
+    saveLocal(LS_KEY, State.progress);
+    saveLocal(LS_WRONG, State.wrong);
+    saveLocal(LS_FAV, State.favorites);
+    saveLocal(LS_LAST, State.last);
+
+    const changed = serverVersion !== (data.version || 0);
     serverVersion = data.version || Date.now();
+    lastServerMergeSnapshot = serverVersion;
+
+    if (applyRenderIfChanged && changed && AUTO_RENDER_VIEWS.has(State.view)) {
+      // 如果 progress / favorites 真的变了 → 重渲染当前首页/错题/收藏，实现"其他设备做题本机立即看到"
+      let afterTs = beforeTs;
+      for (const rec of Object.values(State.progress || {})) {
+        const t = rec?.answeredAt || 0;
+        if (t > afterTs) afterTs = t;
+      }
+      const reallyDirty = (afterTs > beforeTs) || (lastAppliedServerProgressTs !== serverVersion);
+      lastAppliedServerProgressTs = serverVersion;
+      if (reallyDirty) {
+        try {
+          if (State.view === 'home') renderHome();
+          else if (State.view === 'wrong') renderWrongList();
+          else if (State.view === 'favorite') renderFavoriteList();
+          updateContinueBtn?.();
+        } catch (e) { console.warn('[sync] 后台刷新渲染失败：', e.message); }
+      }
+    }
   } catch (e) {
     // 拉取失败时不报错给用户，仅依赖 localStorage 兜底
     console.warn('[sync] 拉取服务端数据失败，使用本地缓存：', e.message);
@@ -147,11 +206,13 @@ async function pushToServer() {
   try {
     while (pendingPush) {
       pendingPush = false;
+      // 注意：服务端 progress 以 answeredAt 时间戳为权威，所以
+      //   上传完整 progress 集合 → 服务端 merge 后再回传 → 客户端再 merge 回本地
+      // favorites 传成 [id]（后端期望是 string[]）
       const payload = {
         progress: State.progress,
         last: State.last,
-        favorites: State.favorites.map(id => ({ id })),
-        wrong: State.wrong,
+        favorites: Array.isArray(State.favorites) ? State.favorites : [],
       };
       try {
         const res = await fetch(API_SYNC, {
@@ -162,14 +223,23 @@ async function pushToServer() {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (data && data.ok) {
-          // 服务端返回的版本是合并后的权威版本；再合并回本地
+          // 服务端合并后版本是权威版本；再 merge 回本地（避免并发拉取导致偏差）
           if (data.progress) State.progress = mergeProgress(State.progress, data.progress);
           if (Array.isArray(data.favorites)) {
             const fset = new Set(data.favorites);
-            for (const id of State.favorites) fset.add(id);
+            for (const id of (State.favorites || [])) fset.add(id);
             State.favorites = [...fset];
           }
+          if (data.last) {
+            const a = (State.last?.updatedAt || 0);
+            const b = data.last.updatedAt || 0;
+            if (b >= a) State.last = data.last;
+          }
           State.wrong = rebuildWrongFromProgress(State.progress);
+          saveLocal(LS_KEY, State.progress);
+          saveLocal(LS_WRONG, State.wrong);
+          saveLocal(LS_FAV, State.favorites);
+          saveLocal(LS_LAST, State.last);
           serverVersion = data.version || serverVersion;
         }
       } catch (e) {
@@ -185,16 +255,43 @@ async function pushToServer() {
   }
 }
 
-function scheduleSync() {
+function scheduleSync({ immediate = false } = {}) {
   // 先保存到本地（兜底）
   saveLocal(LS_KEY, State.progress);
   saveLocal(LS_LAST, State.last);
   saveLocal(LS_WRONG, State.wrong);
   saveLocal(LS_FAV, State.favorites);
 
-  // 异步合并到服务端
+  // 变更即异步推到服务端：immediate 立即推；否则短暂防抖（避免快速连点 10 题发 10 次）
+  if (immediate) {
+    clearTimeout(syncTimer); syncTimer = null;
+    pushToServer();
+    return;
+  }
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => { pushToServer(); }, 150);
+}
+
+function startAutoSyncLoop() {
+  // 页面可见性：tab 切回前台立刻拉一次，后台拉取间隔拉长
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        // 切回前台 → 立即拉一次（拿到手机刚做的题），再重置循环
+        pullFromServer({ applyRenderIfChanged: true }).finally(schedulePullLoop);
+      } else {
+        schedulePullLoop();
+      }
+    });
+  }
+  // 窗口重新 focus → 也立即拉一次
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('focus', () => {
+      pullFromServer({ applyRenderIfChanged: true });
+    });
+  }
+  // 首次立刻拉一次，之后按间隔循环
+  schedulePullLoop();
 }
 
 function mergeProgress(localProgress, serverProgress) {
@@ -844,6 +941,117 @@ async function resetAll() {
   if (State.current) renderQuiz(); else renderHome();
 }
 
+/* ================= 进度导出 / 导入（跨设备同步） ================= */
+function buildBackup() {
+  // 精简：progress 字段里 answeredAt 毫秒数用 delta 节省体积（可选），这里直接全量即可
+  const done = Object.keys(State.progress).length;
+  let right = 0;
+  for (const r of Object.values(State.progress)) if (r && r.correct) right++;
+  return {
+    app: 'ruankao-quiz',
+    version: 1,
+    exportedAt: Date.now(),
+    total: State.total,
+    done,
+    right,
+    wrong: State.wrong.length,
+    favorites: State.favorites.length,
+    payload: {
+      progress: State.progress,
+      favorites: State.favorites,
+      last: State.last,
+    }
+  };
+}
+
+function validateBackup(obj) {
+  if (!obj || typeof obj !== 'object') return '不是有效的备份文件';
+  if (obj.app !== 'ruankao-quiz') return '文件不是本应用的进度备份';
+  if (obj.version !== 1) return '备份版本不兼容，请用当前版本重新导出';
+  if (!obj.payload || typeof obj.payload !== 'object') return '备份缺少 payload';
+  return null;
+}
+
+function exportProgressToFile() {
+  const backup = buildBackup();
+  const blob = new Blob([JSON.stringify(backup, null, 0)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const name = `系规刷题进度_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  try { a.click(); } catch (e) { console.warn(e); }
+  setTimeout(() => {
+    try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch {}
+  }, 2000);
+  alert(`✅ 已生成备份：${name}\n\n请把这个文件发给另一台设备（微信「文件传输助手」即可），在另一台设备的题库首页点「📥导入进度」即可合并同步。`);
+}
+
+function importProgressFromFile(onDone) {
+  // 复用 input file，避免重复创建
+  let input = document.getElementById('__importProgressInput__');
+  if (!input) {
+    input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.id = '__importProgressInput__';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+  }
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      const err = validateBackup(obj);
+      if (err) { alert('❌ ' + err); return; }
+      applyBackup(obj.payload, file.name);
+      if (typeof onDone === 'function') onDone(obj.payload);
+    } catch (e) {
+      console.error(e);
+      alert('❌ 导入失败：文件内容不是合法的 JSON。请确认导入的是本应用生成的「系规刷题进度_xxx.json」。');
+    }
+  };
+  input.click();
+}
+
+function applyBackup(payload, fileName) {
+  const { progress = {}, favorites = [], last = null } = payload || {};
+  const existingDone = Object.keys(State.progress).length;
+  const incomingDone = Object.keys(progress).length;
+
+  // 策略：mergeProgress（同一题时间戳较新的覆盖） + 收藏合并去重
+  State.progress = mergeProgress(State.progress, progress);
+  const favSet = new Set(State.favorites);
+  for (const id of (favorites || [])) favSet.add(id);
+  State.favorites = Array.from(favSet);
+  // last：如果新导入的更新就用它
+  if (last && (!State.last || ((last.updatedAt || 0) >= (State.last.updatedAt || 0)))) {
+    State.last = last;
+  }
+  State.wrong = rebuildWrongFromProgress(State.progress);
+  saveProgressOnly();
+  saveLast(State.last);
+
+  const newDone = Object.keys(State.progress).length - existingDone;
+  const newFav  = State.favorites.length;
+  const summary =
+    `📥 导入成功\n\n` +
+    `导入文件：${fileName || ''}\n` +
+    `· 导入答题记录：${incomingDone} 条\n` +
+    `· 合并后新增记录：${newDone} 条（时间戳更新的会覆盖旧记录）\n` +
+    `· 当前收藏题数：${newFav} 道\n` +
+    `· 当前错题数：${State.wrong.length} 道\n\n` +
+    `✅ 进度已写入本设备本地存储。如果连了服务端，会自动同步到云端。`;
+  alert(summary);
+  renderHome();
+}
+
 /* ================= save 辅助 ================= */
 function saveProgressOnly() {
   saveLocal(LS_KEY, State.progress);
@@ -859,7 +1067,6 @@ function saveLast(obj) {
   // last 也同步到服务端（允许稍慢）
   scheduleSync();
 }
-
 /* ================= 事件绑定 ================= */
 function bindEvents() {
   el('backBtn').addEventListener('click', () => {
@@ -884,6 +1091,9 @@ function bindEvents() {
   el('wrongBtn')?.addEventListener('click', () => switchView('wrong'));
   // 收藏夹入口
   el('favBtnBar')?.addEventListener('click', () => switchView('favorite'));
+  // 导出 / 导入进度
+  el('exportBtn')?.addEventListener('click', exportProgressToFile);
+  el('importBtn')?.addEventListener('click', () => importProgressFromFile());
   // 答题页收藏按钮
   el('favBtn')?.addEventListener('click', () => {
     if (!State.current) return;
@@ -964,6 +1174,8 @@ async function main() {
     // 3) 绑定事件 & 渲染
     bindEvents();
     renderHome();
+    // 4) 启动实时自动同步循环：答题/收藏后立即推；每 5s 拉取其他设备的改动
+    startAutoSyncLoop();
   } catch (e) {
     console.error(e);
     const host = location?.host || '';
