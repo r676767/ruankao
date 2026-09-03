@@ -11,12 +11,17 @@ import { createQuizApi } from '../lib/quiz-api.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
-const APP_DIR = path.join(ROOT, 'app');
 
+// 静态资源 & 题库目录：兼容 docs/（GitHub Pages 规范）和 app/（历史目录）
+const DOCS_DIR = path.join(ROOT, 'docs');
+const OLD_APP_DIR = path.join(ROOT, 'app');
+const APP_DIR = fs.existsSync(DOCS_DIR) ? DOCS_DIR : OLD_APP_DIR;
+
+// 用户进度/配置数据目录（和源代码解耦，固定在项目根 .data/，不会因 docs/ 改名而丢数据）
 const ENV_DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : null;
-const DATA_DIR = ENV_DATA_DIR || path.join(APP_DIR, 'data');
+const DATA_DIR = ENV_DATA_DIR || path.join(ROOT, '.data');
 
-// 题库目录（只读，在源代码里）
+// 题库目录（只读，在源代码 docs/ 或 app/ 里）
 const QUESTIONS_DIR = path.join(APP_DIR, 'data');
 const QUESTIONS_FILE = path.join(QUESTIONS_DIR, 'questions.json');
 
