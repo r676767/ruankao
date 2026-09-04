@@ -26,9 +26,46 @@ const QUESTIONS_DIR = path.join(APP_DIR, 'data');
 const QUESTIONS_FILE = path.join(QUESTIONS_DIR, 'questions.json');
 
 const PORT = Number(process.env.PORT || 8080);
+const PORT_MIN = PORT;
+const PORT_MAX = PORT + 10; // 端口冲突时自动在 8080~8090 范围内找空闲的
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(QUESTIONS_DIR)) fs.mkdirSync(QUESTIONS_DIR, { recursive: true });
+
+/**
+ * 尝试在 [startPort, endPort] 范围内找第一个空闲端口启动 HTTP server
+ * 返回最终实际 listen 的端口号（全部被占或其它异常抛错）
+ * 
+ * 核心实现说明（之前踩过的坑）：
+ *   - 每次 server.listen() 前必须重新注册一次性的 listening / error 监听器
+ *   - resolve 时使用本轮迭代内部变量 p，避免闭包引用被后续覆盖（第一次 8080，第二次 8081 时不能 resolve 回 8080）
+ */
+function tryListen(server, startPort, endPort) {
+  return new Promise((resolve, reject) => {
+    let port = startPort;
+    const tryNext = () => {
+      if (port > endPort) {
+        reject(new Error(`端口 ${startPort}-${endPort} 全部被占用，请手动关闭占用的程序后重试（或换个空闲端口）`));
+        return;
+      }
+      const p = port++;
+      // 每次 listen 前清理上轮的一次性监听（防止跨轮事件残留）
+      server.removeAllListeners('listening');
+      server.removeAllListeners('error');
+      server.once('listening', () => resolve(p));
+      server.once('error', (err) => {
+        if (err && (err.code === 'EADDRINUSE' || String(err.syscall) === 'listen')) {
+          console.log(`  端口 ${p} 被占用，尝试 ${p + 1} ...`);
+          setTimeout(tryNext, 200); // 避开 TCP CLOSE_WAIT 状态立即重试的误判
+        } else {
+          reject(err);
+        }
+      });
+      server.listen(p, '0.0.0.0');
+    };
+    tryNext();
+  });
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -294,31 +331,35 @@ const server = http.createServer((req, res) => {
   process.on('SIGINT', onExit);
   process.on('SIGTERM', onExit);
 
-  server.listen(PORT, '0.0.0.0', () => {
-    const qCount = (() => {
-      try {
-        if (fs.existsSync(QUESTIONS_FILE)) {
-          const obj = JSON.parse(fs.readFileSync(QUESTIONS_FILE, 'utf-8'));
-          let n = 0, chapterN = 0;
-          for (const ch of obj.chapters || []) {
-            chapterN++;
-            for (const s of ch.sections || []) n += (s.questions || []).length;
-          }
-          return { n, chapterN };
+  // 预计算题目数（复用原来的立即执行表达式，挂到 listen 成功后打印）
+  const qCount = (() => {
+    try {
+      if (fs.existsSync(QUESTIONS_FILE)) {
+        const obj = JSON.parse(fs.readFileSync(QUESTIONS_FILE, 'utf-8'));
+        let n = 0, chapterN = 0;
+        for (const ch of obj.chapters || []) {
+          chapterN++;
+          for (const s of ch.sections || []) n += (s.questions || []).length;
         }
-      } catch {}
-      return { n: 0, chapterN: 0 };
-    })();
+        return { n, chapterN };
+      }
+    } catch {}
+    return { n: 0, chapterN: 0 };
+  })();
 
+  // 🚀 端口自动递增：8080 被占用自动试 8081~8090，绝不秒退
+  try {
+    const actualPort = await tryListen(server, PORT_MIN, PORT_MAX);
+    // 监听成功，打印启动横幅（使用真正的实际端口 actualPort）
+    const lans = getLanIPs();
+    const realLans = lans.filter(ip => ip !== '127.0.0.1');
     console.log('============================================');
     console.log('  系规刷题应用 已启动 ✅');
     console.log('============================================');
-    console.log(`  本机访问⭐: http://localhost:${PORT}    👉 （最推荐！本机回环 100% 必达·不经过虚拟网卡）`);
-    const lans = getLanIPs();
-    const realLans = lans.filter(ip => ip !== '127.0.0.1');
+    console.log(`  本机访问⭐: http://localhost:${actualPort}    👉 （最推荐！本机回环 100% 必达·不经过虚拟网卡）`);
     if (realLans.length > 0) {
       for (const ip of realLans) {
-        console.log(`  手机同WiFi: http://${ip}:${PORT}   （手机/平板跨设备）`);
+        console.log(`  手机同WiFi: http://${ip}:${actualPort}   （手机/平板跨设备）`);
       }
     } else {
       console.log(`  手机同WiFi: 未检测到可用局域网 IP，请连 WiFi/网线后重启`);
@@ -334,5 +375,23 @@ const server = http.createServer((req, res) => {
     console.log('  ⚠️  请勿访问 192.168.207.x / VMware / Hyper-V 等虚拟IP：跨子网会卡死"正在加载题库..."');
     console.log('  按 Ctrl + C 停止服务');
     console.log('============================================');
-  });
-})().catch(e => { console.error('[main] 启动失败:', e); process.exit(1); });
+  } catch (e) {
+    // 端口全部被占 / 其它错误：友好打印 + 不秒退（用户能看到错误）
+    console.error('============================================');
+    console.error('  ❌ 启动失败');
+    console.error('============================================');
+    console.error(`  原因：${e.message}`);
+    console.error('');
+    console.error('  解决办法：');
+    console.error('    ① 关闭所有黑色 cmd/node 窗口，再双击 bat 重新启动');
+    console.error('    ② 在 PowerShell 执行：  Get-Process node | Stop-Process -Force');
+    console.error(`    ③ 或手动换端口：  set PORT=8090 & node scripts\\server.js`);
+    console.error('============================================');
+    try { await api._internal.flush(); } catch {}
+    // 不立即 exit(1)：pause 2 分钟让用户能看到错误
+    setTimeout(() => process.exit(1), 120000);
+  }
+})().catch(e => {
+  console.error('[main] 启动失败:', e);
+  setTimeout(() => process.exit(1), 120000);
+});

@@ -17,6 +17,33 @@
   const ACCEPT_VND = 'application/vnd.github+json';
   const UA = 'ruankao-quiz/1.0 (+https://github.com/r676767/ruankao)';
 
+  /* =========================================================================
+   *  DEFAULT_*：永久硬编码您的个人 Gist 同步配置
+   *  → 目的：任何浏览器（电脑 / 手机 / 平板 / 新设备）打开本应用，
+   *          无需再手动⚙️填写配置 → 同步自动启用、不弹任何配置框！
+   *  → 来源：桌面快捷 bat 中的 gh_token + gist_id（您已配置好）
+   *  → 覆盖顺序（优先级高→低）：
+   *      1. URL 书签 #autoconf=1&gh_token=…&gist_id=…（桌面快捷 bat 传的）
+   *      2. localStorage 用户自己通过⚙️【保存并启用】或【清空配置】的历史值
+   *      3. DEFAULT_GH_TOKEN + DEFAULT_GIST_ID（这里的硬编码默认值）
+   *  → 用户点了⚙️【清空配置】：我们会写 LS_CFG_CLEARED=true 跳过默认值（尊重用户意愿）
+   * ========================================================================= */
+  const DEFAULT_GH_TOKEN = '' // <-- 不在 git 中保存 Token，安全！请第一次打开时使用自动配置 URL（桌面快捷 bat/桌面生成的 一键书签.txt）或点⚙️填写;
+  const DEFAULT_GIST_ID = 'fca886b3e1393d79eb9b8d4e6afda25f';
+  const LS_CFG_CLEARED = 'ruankao.cloud.cfg.cleared.v1'; // 用户明确清空过 → 不再用默认值
+  /** 返回默认配置（只有"有效"才返回）*/
+  function getDefaults() {
+    const token = String(DEFAULT_GH_TOKEN || '').trim();
+    const gid = String(DEFAULT_GIST_ID || '').trim();
+    if (!token || !gid) return null;
+    if (token.startsWith('<') || token.includes('请替换')) return null;
+    if (gid.startsWith('<') || gid.includes('请替换')) return null;
+    return { ghToken: token, gistId: gid };
+  }
+  function userHasExplicitlyCleared() {
+    try { return localStorage.getItem(LS_CFG_CLEARED) === '1'; } catch { return false; }
+  }
+
   /* ---------------- 1. userdata-core 纯函数（无依赖） ---------------- */
   function emptyUserData() {
     return { progress: {}, wrong: [], favorites: [], last: null, version: Date.now() };
@@ -157,20 +184,30 @@
   function loadCfg() {
     try {
       const raw = localStorage.getItem(LS_CFG);
-      if (!raw) return null;
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj.ghToken === 'string' && typeof obj.gistId === 'string') {
-        if (obj.ghToken.length > 0 && obj.gistId.length > 0) return obj;
+      if (raw) {
+        try {
+          const obj = JSON.parse(raw);
+          if (obj && typeof obj.ghToken === 'string' && typeof obj.gistId === 'string') {
+            if (obj.ghToken.length > 0 && obj.gistId.length > 0) return obj;
+          }
+        } catch {}
+      }
+      // localStorage 无有效配置 → 尝试硬编码默认值（但要尊重用户明确【清空配置】的历史）
+      if (!userHasExplicitlyCleared()) {
+        const def = getDefaults();
+        if (def) return def;
       }
       return null;
     } catch { return null; }
   }
   function saveCfg({ ghToken, gistId }) {
     localStorage.setItem(LS_CFG, JSON.stringify({ ghToken: String(ghToken || ''), gistId: String(gistId || '') }));
+    try { localStorage.removeItem(LS_CFG_CLEARED); } catch {}
     _clientCache = null; _clientCacheKey = '';
   }
   function clearCfg() {
     localStorage.removeItem(LS_CFG);
+    try { localStorage.setItem(LS_CFG_CLEARED, '1'); } catch {} // 记录用户明确清空，不再用默认值
     _clientCache = null; _clientCacheKey = '';
   }
   function getClient() {
@@ -413,27 +450,74 @@
         // 自动写入 localStorage，打开即进入同步模式
         saveCfg({ gistId: gid.trim(), ghToken: token.trim() });
         showTopToast('✅ 书签已自动启用跨设备同步（Gist ' + gid.trim().slice(0, 8) + '…），右上角⚙️可查看/修改', 'ok');
-        // 通知 app.js：配置变了，立即重新拉一次（若 app.js 已初始化了 RuanKaoSync 会在下一轮 pull 里生效，这里主动触发一下）
-        if (typeof window.RKNotifyHashApplied === 'function') try { window.RKNotifyHashApplied(); } catch {}
-        if (typeof window.dispatchEvent === 'function') try { window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: gid.trim() } })); } catch {}
+        // 【关键】自动关 Modal + 通知 app.js 切到首页章节列表（防止用户还停留在收藏夹/错题本空视图或 Modal 覆盖首页导致「无法刷题」）
+        try { RuanKaoSync.closeSettingsModal(); } catch {}
+        try {
+          if (typeof window.RKNotifyHashApplied === 'function') window.RKNotifyHashApplied({ gistId: gid.trim(), ghToken: token.trim() });
+        } catch {}
+        try {
+          if (typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: gid.trim(), ghToken: token.trim(), needSwitchHome: true } }));
+          }
+        } catch {}
+        // DOM 里还有任何别的 mask / sheet（答题卡/章节选择/Modal mask）残留，全部尝试兜底隐藏
+        try {
+          ['rcSyncMask','rcSyncModal','sheetMask','sheet'].forEach(function(id){
+            var el = document.getElementById(id); if (el) el.hidden = true;
+          });
+        } catch {}
       } else {
-        // 只预填，用户确认后手动点保存
+        // 只预填，不弹 Modal（避免覆盖首页）；除非当前完全没有任何有效配置
+        const hasAnyCfg = !!loadCfg();
         setTimeout(() => {
           try {
             document.getElementById('rcGistId').value = gid.trim();
             document.getElementById('rcGhToken').value = token.trim();
           } catch {}
-          if (typeof RuanKaoSync !== 'undefined' && RuanKaoSync.openSettingsModal) {
+          if (!hasAnyCfg && typeof RuanKaoSync !== 'undefined' && RuanKaoSync.openSettingsModal) {
             RuanKaoSync.openSettingsModal();
             try {
               document.getElementById('rcGistId').value = gid.trim();
               document.getElementById('rcGhToken').value = token.trim();
             } catch {}
             showTopToast('💡 书签已自动填入配置，请点【保存并启用】或先【测试连接】确认', 'warn');
+          } else {
+            showTopToast('💡 书签已预填配置（右上角⚙️可查看/保存），现有配置优先级更高', 'ok');
           }
         }, 300);
       }
     } catch (e) { /* 书签解析失败无副作用 */ console.warn('[gist-client] autoApplyFromURL failed:', e); }
+  }
+
+  /**
+   * 页面加载 → 自动启用默认同步配置（不弹任何 Modal / 不盖遮罩）
+   *   - 如果 localStorage 已有配置（用户自己⚙️保存过 / URL 书签已经写入）→ 不动它
+   *   - 如果 localStorage 没有，但 DEFAULT_* 硬编码了且用户没明确清空过 → 写入 localStorage 并宣告启用
+   *   - 成功后 dispatch ruankao:cfg-applied 让 app.js 强制切到首页章节列表视图
+   */
+  function autoApplyDefaults() {
+    try {
+      // 1) 如果用户有本地存储（非默认值的），直接跳过
+      const hasLocal = (function () {
+        try {
+          const raw = localStorage.getItem(LS_CFG);
+          if (!raw) return false;
+          const obj = JSON.parse(raw);
+          return (obj && typeof obj.ghToken === 'string' && obj.ghToken.length > 0 && typeof obj.gistId === 'string' && obj.gistId.length > 0);
+        } catch { return false; }
+      })();
+      if (hasLocal) return;
+      if (userHasExplicitlyCleared()) return;
+      const def = getDefaults();
+      if (!def) return;
+      saveCfg(def);
+      showTopToast('☁️ 跨设备同步已自动启用（个人配置，5 秒级实时），右上角⚙️可查看', 'ok');
+      try {
+        if (typeof window.dispatchEvent === 'function') {
+          window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: def.gistId, ghToken: def.ghToken, fromDefaults: true, needSwitchHome: true } }));
+        }
+      } catch {}
+    } catch (e) { console.warn('[gist-client] autoApplyDefaults failed:', e); }
   }
 
   /* ---------------- 7. 初始化全局对象 ---------------- */
@@ -447,21 +531,74 @@
     async postReset(opts) { return apiPostReset(opts); },
     async patchRemoveIds(ids) { return apiPatchRemoveIds(ids); },
     // --- UI ---
-    openSettingsModal() { ensureModalInDOM(); document.getElementById('rcSyncMask').hidden = false; document.getElementById('rcSyncModal').hidden = false; updateTip(); loadCfg() && (document.getElementById('rcGistId').value = loadCfg().gistId, document.getElementById('rcGhToken').value = loadCfg().ghToken); },
+    openSettingsModal() {
+      ensureModalInDOM();
+      document.getElementById('rcSyncMask').hidden = false;
+      document.getElementById('rcSyncModal').hidden = false;
+      updateTip();
+      const cfg = loadCfg();
+      if (cfg) {
+        document.getElementById('rcGistId').value = cfg.gistId || '';
+        document.getElementById('rcGhToken').value = cfg.ghToken || '';
+        // 如果使用的是 DEFAULT_* 默认硬编码值，给个小字提示（只读，方便用户看）
+        try {
+          const hint = document.getElementById('rcDefaultsHint');
+          if (hint && !document.getElementById('rcDefaultsHintSlot')) {
+            try {
+              const hasLocalCfg = (function () { try { return !!localStorage.getItem(LS_CFG); } catch { return false; } })();
+              if (!hasLocalCfg && !userHasExplicitlyCleared()) {
+                const sl = document.createElement('div');
+                sl.id = 'rcDefaultsHintSlot';
+                sl.style.cssText = 'margin-top:6px;padding:6px 10px;border-radius:8px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:12px;line-height:1.5;';
+                sl.textContent = '✨ 已自动使用您的个人配置（任何新设备/新浏览器打开即启用，无需再手动填写）';
+                hint.parentNode.insertBefore(sl, hint.nextSibling);
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    },
     closeSettingsModal() { const m = document.getElementById('rcSyncMask'); if (m) m.hidden = true; const mm = document.getElementById('rcSyncModal'); if (mm) mm.hidden = true; },
     // --- 配置 ---
     loadCfg, saveCfg, clearCfg,
     // --- 书签解析工具（外部可直接调试）---
-    autoApplyFromURL, parseHashParams,
+    autoApplyFromURL, autoApplyDefaults, parseHashParams,
   };
+
+  // 启动前：注册 close X 按钮 + 保证遮罩层只被用户操作；然后自动应用默认配置（不弹任何 Modal）
+  function _bootstrapOnce() {
+    ensureModalInDOM();
+    // 确保 Modal 的 × 关闭按钮绑定（只绑一次，避免重复）
+    try {
+      const closeBtn = document.getElementById('rcSyncClose');
+      if (closeBtn && !closeBtn.dataset._rkBound) {
+        closeBtn.dataset._rkBound = '1';
+        closeBtn.addEventListener('click', function () { RuanKaoSync.closeSettingsModal(); });
+      }
+      const mask = document.getElementById('rcSyncMask');
+      if (mask && !mask.dataset._rkBound) {
+        mask.dataset._rkBound = '1';
+        mask.addEventListener('click', function (e) { if (e.target === mask) RuanKaoSync.closeSettingsModal(); });
+      }
+    } catch {}
+    // 【关键】永远不要自动弹出 Modal！只有用户点击⚙️才打开！
+    try {
+      ['rcSyncMask','rcSyncModal'].forEach(function (id) {
+        var el = document.getElementById(id); if (el) el.hidden = true;
+      });
+    } catch {}
+    // 1) 先应用 URL 书签（autoconf=1 走桌面快捷 bat 的路径）
+    try { autoApplyFromURL(); } catch {}
+    // 2) 再应用硬编码默认值（手机新设备直接进来也能自动启用同步，不弹任何框）
+    try { autoApplyDefaults(); } catch {}
+  }
 
   // 启动前如果 DOM 已经 ready，先把 Modal 基础闭包绑好，再尝试从 URL 书签自动应用配置
   if (typeof document !== 'undefined') {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () { ensureModalInDOM(); autoApplyFromURL(); }, { once: true });
+      document.addEventListener('DOMContentLoaded', _bootstrapOnce, { once: true });
     } else {
-      ensureModalInDOM();
-      autoApplyFromURL();
+      _bootstrapOnce();
     }
   }
 

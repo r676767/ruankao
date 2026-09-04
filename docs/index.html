@@ -4,8 +4,71 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
   <meta name="theme-color" content="#6aa7ff" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>系规 · 综合分章节刷题 2026</title>
   <link rel="stylesheet" href="./styles.css" />
+  <!-- 【诊断】任何脚本语法错误/加载失败/运行时未捕获异常 → 立刻红屏弹窗，不用再瞎猜 -->
+  <script>
+    (function () {
+      var bootTs = Date.now();
+      var bootLog = [];
+      window.__RUANKAO_BOOT = {
+        log: function (step, detail) {
+          var row = { t: (Date.now() - bootTs) + 'ms', step: step, detail: detail || '' };
+          bootLog.push(row);
+          try { console.log('[RUANKAO BOOT]', row.t, step, detail); } catch (e) {}
+          // 同步更新 loader 文案显示具体走到哪一步了（用户不用看控制台就能知道卡在哪）
+          try {
+            var ldr = document.getElementById('loader');
+            if (ldr) {
+              var sub = ldr.querySelector('.loader-substep');
+              if (!sub) { sub = document.createElement('div'); sub.className = 'loader-substep'; sub.style.fontSize='12px'; sub.style.marginTop='10px'; sub.style.color='#6aa7ff'; ldr.appendChild(sub); }
+              sub.textContent = '(' + row.t + ') ' + step + (detail ? ' → ' + detail : '');
+            }
+          } catch (e) {}
+        },
+        logs: bootLog
+      };
+      window.__RUANKAO_BOOT.log('00 HTML loaded');
+
+      function showFatal(title, body, extra) {
+        try {
+          var ldr = document.getElementById('loader');
+          if (ldr) {
+            ldr.querySelector('.spinner') && (ldr.querySelector('.spinner').style.display='none');
+            ldr.innerHTML = '' +
+              '<div style="color:#d93025;font-weight:700;font-size:16px;margin-bottom:12px">❌ ' + title + '</div>' +
+              '<div style="background:#fff0f0;border:1px solid #f5bfbf;border-radius:8px;padding:12px 14px;color:#7b1a1a;font-size:13px;line-height:1.6;text-align:left;max-width:520px">' +
+              (body || '') +
+              (extra ? '<hr style="border:none;border-top:1px dashed #e5a3a3;margin:10px 0">' + extra : '') +
+              '</div>' +
+              '<div style="margin-top:14px;font-size:12px;color:#888">把上面红色错误框拍照发我 → 10 秒修好</div>';
+            ldr.style.textAlign='left'; ldr.style.maxWidth='580px'; ldr.style.margin='20px auto';
+            ldr.hidden = false;
+          }
+        } catch (e) {}
+        try {
+          alert('软考刷题 - 启动失败：' + title + '\n\n' + body + '\n\n把上面的红色错误框内容发给开发者即可解决。');
+        } catch (e) {}
+      }
+      window.addEventListener('error', function (ev) {
+        var msg = (ev.error && ev.error.stack) ? (ev.error.name + ': ' + ev.error.message + '\n' + ev.error.stack.split(/\n/).slice(0, 6).join('\n')) : (ev.message || String(ev));
+        showFatal('脚本执行出错（' + (ev.filename ? ev.filename.split('/').pop() : '') + ':' + ev.lineno + ')',
+          String(msg).replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'),
+          '建议：① Ctrl+Shift+R 强制刷新清缓存  ② 关闭所有黑色窗口后重新双击 bat 再试');
+      }, true);
+      window.addEventListener('unhandledrejection', function (ev) {
+        var msg = (ev.reason && ev.reason.stack) ? (ev.reason.name + ': ' + ev.reason.message + '\n' + ev.reason.stack.split(/\n/).slice(0, 6).join('\n')) : String(ev.reason);
+        showFatal('异步 Promise 未捕获异常',
+          String(msg).replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'),
+          '建议：① Ctrl+Shift+R 强制刷新  ② 检查 Token/GistID 权限和网络');
+      }, true);
+      window.addEventListener('DOMContentLoaded', function () { window.__RUANKAO_BOOT.log('01 DOMContentLoaded'); });
+    })();
+  </script>
+  <script>window.__RUANKAO_BOOT && window.__RUANKAO_BOOT.log('02 bootstrap OK (error handlers armed)');</script>
 </head>
 <body>
   <div id="app">
@@ -187,9 +250,38 @@
     <div class="loader" id="loader">
       <div class="spinner"></div>
       <div>正在加载题库…</div>
+      <div class="loader-substep" style="font-size:12px;margin-top:10px;color:#6aa7ff">等待脚本启动…</div>
     </div>
   </div>
-  <script src="./gist-client.js"></script>
-  <script src="./app.js"></script>
+  <script>
+    // 【诊断】每个外链脚本加载失败（404/被墙/Content-Length 不匹配）立刻 alert 红色错误框，不用再瞎猜
+    function _onScriptFail(ev) {
+      var s = ev && ev.target && ev.target.src ? ev.target.src.split('/').pop() : 'script';
+      window.addEventListener('DOMContentLoaded', function () {
+        window.__RUANKAO_BOOT && window.__RUANKAO_BOOT.log('FATAL 脚本加载失败：' + s);
+        if (window.__RUANKAO_BOOT && typeof window.__RUANKAO_BOOT === 'object') {
+          var ldr = document.getElementById('loader');
+          if (ldr) {
+            ldr.querySelector && ldr.querySelector('.spinner') && (ldr.querySelector('.spinner').style.display='none');
+            ldr.innerHTML =
+              '<div style="color:#d93025;font-weight:700;font-size:16px;margin-bottom:12px">❌ 脚本加载失败：' + s + '</div>' +
+              '<div style="background:#fff0f0;border:1px solid #f5bfbf;border-radius:8px;padding:12px 14px;color:#7b1a1a;font-size:13px;line-height:1.6;text-align:left;max-width:540px">' +
+              '服务器上找不到这个 <b>' + s + '</b> 文件，或浏览器缓存了过期版本。<br><br>' +
+              '<b>解决办法（按顺序做）：</b><br>' +
+              '① 页面上按 <code style="background:#fff5e6;padding:1px 6px;border-radius:4px">Ctrl + Shift + R</code>（强制刷新，跳过缓存）<br>' +
+              '② 关闭所有黑色 cmd/node 窗口，然后重新双击「桌面快捷-软考刷题（个人专用·已配同步）.bat」<br>' +
+              '③ 在 PowerShell 执行：<code style="background:#fff5e6;padding:1px 6px;border-radius:4px">Get-Process node -ErrorAction SilentlyContinue \| Stop-Process -Force ; cd E:\code\ruankao ; node scripts/server.js</code> 再手动开 <code style="background:#fff5e6;padding:1px 6px;border-radius:4px">http://localhost:8080/</code><br>' +
+              '④ 仍失败：把这段红色错误框截图发我。' +
+              '</div>';
+            ldr.style.textAlign='left'; ldr.style.maxWidth='600px'; ldr.style.margin='24px auto'; ldr.hidden=false;
+          }
+          alert('脚本加载失败：' + s + '\n解决办法已经显示在页面红色错误框里，按 Ctrl+Shift+R 强制刷新试试。');
+        }
+      });
+    }
+  </script>
+  <script src="./gist-client.js" onerror="_onScriptFail(event)"></script>
+  <script src="./app.js" onerror="_onScriptFail(event)"></script>
+  <script>window.__RUANKAO_BOOT && window.__RUANKAO_BOOT.log('10 All script tags injected');</script>
 </body>
 </html>

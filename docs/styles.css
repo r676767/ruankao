@@ -511,6 +511,14 @@ button { font-family: inherit; }
   align-items: center; justify-content: center;
   gap: 14px; color: var(--primary-dark); font-size: 14px;
 }
+/* 【关键修复】UA 样式里 [hidden] { display: none } 特异性只有 0-0-0-0，
+   会被类选择器 .loader { display: flex } (0-0-1-0) 覆盖，
+   导致 loader.hidden=true 也仍然显示。这里用 0-1-1-0 特异性强制覆盖。 */
+.loader[hidden],
+.loader[hidden="true"],
+body > div.loader[hidden] {
+  display: none !important;
+}
 .spinner {
   width: 38px; height: 38px; border-radius: 50%;
   border: 3px solid var(--primary-light);

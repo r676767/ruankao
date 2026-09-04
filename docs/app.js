@@ -434,6 +434,7 @@ function flattenData(json) {
 
 /* ================= 首页：章节列表 ================= */
 function renderHome() {
+  const boot = window.__RUANKAO_BOOT;
   // 顶部统计
   const { done, right, total, left } = computeStats(State.flatQuestions);
   setText('totalDone', done + ' / ' + total);
@@ -447,8 +448,9 @@ function renderHome() {
   updateContinueBtn();
 
   const list = el('chapterList');
-  if (!list) return;
+  if (!list) { boot && boot.log('renderHome WARN chapterList element missing'); return; }
   list.innerHTML = '';
+  const chapterN = State.data.chapters.length;
   for (const ch of State.data.chapters) {
     const qs = State.flatQuestions.filter(f => f.chapter.id === ch.id);
     const { done, right, wrong, total, left } = computeStats(qs);
@@ -469,9 +471,20 @@ function renderHome() {
         <span>进入 ›</span>
       </div>
     `;
-    item.addEventListener('click', () => enterChapter(ch.id));
+    // 章节卡片点击：打点 + 捕获错误（之前 nonEmpty=0 时静默 return，用户以为「点了没反应无法刷题」）
+    item.addEventListener('click', function () {
+      boot && boot.log('UI click: chapter-item', `ch.id=${ch.id}  title="${String(ch.title||'').slice(0,20)}…"  sections=${ch.sections.length}`);
+      try {
+        enterChapter(ch.id);
+      } catch (err) {
+        console.error(err);
+        boot && boot.log('FAIL chapter-item click', `${err.name}: ${err.message}`);
+        try { alert('进入章节失败：' + err.name + '\n' + err.message + '\n\n请按 Ctrl+Shift+R 强制刷新后重试。'); } catch(_) {}
+      }
+    });
     list.appendChild(item);
   }
+  boot && boot.log('renderHome OK', `chapters=${chapterN}  totalQuestions=${State.flatQuestions.length}`);
 }
 
 function updateContinueBtn() {
@@ -482,9 +495,19 @@ function updateContinueBtn() {
 
 /* ================= 进入章节/小节 ================= */
 function enterChapter(chapterId) {
+  const boot = window.__RUANKAO_BOOT;
   const ch = State.data.chapters.find(c => c.id === chapterId);
+  if (!ch) {
+    boot && boot.log('enterChapter WARN chapter not found', `chapterId=${chapterId}`);
+    return;
+  }
   const nonEmpty = ch.sections.filter(s => s.questions && s.questions.length);
-  if (nonEmpty.length === 0) return;
+  if (nonEmpty.length === 0) {
+    // 本章所有小节都为空 → 给用户明确提示（之前静默 return，用户以为「点了没反应，无法刷题」）
+    boot && boot.log('enterChapter EMPTY', `ch.id=${ch.id}  name="${ch.title}"`);
+    try { alert('【' + ch.index + '. ' + ch.title + '】' + '\n本章暂无可刷题目（所有小节题目数为 0）。\n建议返回上一页选择其它章节。'); } catch(_) {}
+    return;
+  }
 
   if (nonEmpty.length === 1) {
     enterSection(chapterId, nonEmpty[0].id);
@@ -590,6 +613,8 @@ function startQuiz(questionList, ctx) {
 
 /* ================= 视图切换 ================= */
 function switchView(name, ctx) {
+  const boot = window.__RUANKAO_BOOT;
+  boot && boot.log('switchView', String(name) + (ctx ? ' ctx=' + JSON.stringify(ctx) : ''));
   State.view = name;
   setHidden('homeView', name !== 'home');
   setHidden('quizView', name !== 'quiz');
@@ -601,31 +626,37 @@ function switchView(name, ctx) {
   const favBtn = el('favBtn');
   if (favBtn) favBtn.style.display = (name === 'quiz') ? 'inline-flex' : 'none';
 
-  if (name === 'home') {
-    setText('pageTitle', '系规分章节题库');
-    setText('pageSubtitle', '系统规划与管理师 · 2026有解析版');
-    renderHome();
-  } else if (name === 'wrong') {
-    setText('pageTitle', '错题本');
-    setText('pageSubtitle', `共 ${State.wrong.length} 道错题`);
-    renderWrongList();
-  } else if (name === 'favorite') {
-    setText('pageTitle', '收藏夹');
-    setText('pageSubtitle', `共 ${State.favorites.length} 道收藏`);
-    renderFavoriteList();
-  } else {
-    const ch = State.data.chapters.find(c => c.id === State.current.chapterId);
-    if (ch) {
-      const sec = ch.sections.find(s => s.id === State.current.sectionId);
-      if (sec) {
-        setText('pageTitle', `第${ch.index}章 · ${sec.number}`);
-        setText('pageSubtitle', sec.title);
+  try {
+    if (name === 'home') {
+      setText('pageTitle', '系规分章节题库');
+      setText('pageSubtitle', '系统规划与管理师 · 2026有解析版 · 点下方任意章节卡片开始刷题 ✨');
+      renderHome();
+    } else if (name === 'wrong') {
+      setText('pageTitle', '错题本');
+      setText('pageSubtitle', `共 ${State.wrong.length} 道错题 ${State.wrong.length === 0 ? '（先去章节刷题，错题会自动收录）' : '→ 点【练习错题】开始'}`);
+      renderWrongList();
+    } else if (name === 'favorite') {
+      setText('pageTitle', '收藏夹');
+      setText('pageSubtitle', `共 ${State.favorites.length} 道收藏 ${State.favorites.length === 0 ? '（答题页点 ⭐ 可收藏题目）' : '→ 点击任意题目开始'}`);
+      renderFavoriteList();
+    } else {
+      const ch = State.data.chapters.find(c => c.id === State.current.chapterId);
+      if (ch) {
+        const sec = ch.sections.find(s => s.id === State.current.sectionId);
+        if (sec) {
+          setText('pageTitle', `第${ch.index}章 · ${sec.number}`);
+          setText('pageSubtitle', sec.title);
+        }
+      }
+      if (!ctx) {
+        setText('pageTitle', '练习模式');
+        setText('pageSubtitle', `共 ${State.current.questions.length} 题`);
       }
     }
-    if (!ctx) {
-      setText('pageTitle', '练习模式');
-      setText('pageSubtitle', `共 ${State.current.questions.length} 题`);
-    }
+  } catch (err) {
+    console.error('[switchView]', err);
+    boot && boot.log('FAIL switchView', `${err.name}: ${err.message}`);
+    try { alert('视图切换失败：' + err.name + '\n' + err.message + '\n\n建议 Ctrl+Shift+R 强制刷新后重试。'); } catch(_) {}
   }
 }
 
@@ -1146,17 +1177,33 @@ function saveLast(obj) {
 }
 /* ================= 事件绑定 ================= */
 function bindEvents() {
-  el('backBtn').addEventListener('click', () => {
+  const boot = window.__RUANKAO_BOOT;
+  // Helper：安全包一层 click handler，避免静默 throw + 自动 boot 打点
+  function safeClick(el, label, fn) {
+    if (!el) return;
+    el.addEventListener('click', function (ev) {
+      boot && boot.log('UI click', label);
+      try {
+        fn.call(el, ev);
+      } catch (err) {
+        console.error(err);
+        boot && boot.log('FAIL ' + label, `${err.name}: ${err.message}`);
+        try { alert(`${label} 操作失败：\n${err.name}: ${err.message}\n\n建议 Ctrl+Shift+R 强制刷新后重试。`); } catch(_) {}
+      }
+    });
+  }
+
+  safeClick(el('backBtn'), '返回首页', function () {
     State.current = null;
     switchView('home');
   });
-  el('submitBtn').addEventListener('click', submitCurrent);
-  el('prevBtn').addEventListener('click', goPrev);
-  el('nextBtn').addEventListener('click', goNext);
-  el('cardBtn').addEventListener('click', openSheet);
-  el('closeSheet').addEventListener('click', closeSheet);
-  el('sheetMask').addEventListener('click', closeSheet);
-  el('continueBtn').addEventListener('click', () => {
+  safeClick(el('submitBtn'), '提交答案', submitCurrent);
+  safeClick(el('prevBtn'), '上一题', goPrev);
+  safeClick(el('nextBtn'), '下一题', goNext);
+  safeClick(el('cardBtn'), '答题卡', openSheet);
+  safeClick(el('closeSheet'), '关答题卡', closeSheet);
+  safeClick(el('sheetMask'), '答题卡遮罩关闭', closeSheet);
+  safeClick(el('continueBtn'), '继续上次进度', function () {
     if (!State.last) return;
     const ch = State.data.chapters.find(c => c.id === State.last.chapterId);
     if (!ch) { saveLast(null); return; }
@@ -1165,28 +1212,28 @@ function bindEvents() {
   });
 
   // 错题本入口
-  el('wrongBtn')?.addEventListener('click', () => switchView('wrong'));
+  safeClick(el('wrongBtn'), '打开错题本', function () { switchView('wrong'); });
   // 收藏夹入口
-  el('favBtnBar')?.addEventListener('click', () => switchView('favorite'));
+  safeClick(el('favBtnBar'), '打开收藏夹', function () { switchView('favorite'); });
   // 导出 / 导入进度
-  el('exportBtn')?.addEventListener('click', exportProgressToFile);
-  el('importBtn')?.addEventListener('click', () => importProgressFromFile());
+  safeClick(el('exportBtn'), '导出进度文件', exportProgressToFile);
+  safeClick(el('importBtn'), '导入进度文件', function () { importProgressFromFile(); });
   // 答题页收藏按钮
-  el('favBtn')?.addEventListener('click', () => {
+  safeClick(el('favBtn'), '答题页收藏/取消收藏', function () {
     if (!State.current) return;
     const qid = State.current.questions[State.current.index].question.id;
     toggleFavorite(qid);
   });
 
   // 错题本里的「练习错题」按钮
-  el('wrongPracticeBtn')?.addEventListener('click', () => {
-    if (!State.wrong.length) return;
+  safeClick(el('wrongPracticeBtn'), '练习错题本', function () {
+    if (!State.wrong.length) { try { alert('错题本暂无题目。先去章节刷题，错题会自动收录到这里 ✨'); } catch(_) {} return; }
     startQuizFromList('wrong', State.wrong[0].id);
   });
   // 错题本清空
-  el('wrongClearBtn')?.addEventListener('click', () => {
-    if (!State.wrong.length) return;
-    // 二次确认（无 confirm 弹窗，适配移动端）
+  let clearConfirmTimer = null;
+  safeClick(el('wrongClearBtn'), '清空错题本', function () {
+    if (!State.wrong.length) { try { alert('错题本本来就空的哦 ~'); } catch(_) {} return; }
     const btn = el('wrongClearBtn');
     if (btn.dataset.confirming === '1') {
       const ids = State.wrong.map(w => w.id);
@@ -1197,35 +1244,40 @@ function bindEvents() {
       renderWrongList();
       btn.dataset.confirming = '0';
       btn.textContent = '清空错题本';
+      boot && boot.log('wrongbook cleared', `count=${ids.length}`);
+      try { alert(`已清空错题本（共 ${ids.length} 道）`); } catch(_) {}
     } else {
       btn.dataset.confirming = '1';
       btn.textContent = '再次点击确认清空';
-      setTimeout(() => { btn.dataset.confirming = '0'; btn.textContent = '清空错题本'; }, 3000);
+      clearConfirmTimer = setTimeout(() => { btn.dataset.confirming = '0'; btn.textContent = '清空错题本'; clearConfirmTimer = null; }, 3000);
     }
   });
 
   // 重置按钮（答题页：单击重置当前节 / 首页：双击重置全部）
   let resetTimer = null;
-  el('resetBtn').addEventListener('click', () => {
+  safeClick(el('resetBtn'), '重置进度', function () {
     if (State.current) {
       resetCurrent();
     } else if (State.view === 'home') {
       if (resetTimer) {
         clearTimeout(resetTimer); resetTimer = null;
         resetAll();
+        try { alert('全部进度已清空 ✅'); } catch(_) {}
       } else {
         resetTimer = setTimeout(() => {
-          alert('请再次点击该按钮以确认清空全部进度');
+          try { alert('请再次点击【重置】按钮以确认清空所有答题进度、错题和收藏。'); } catch(_) {}
           resetTimer = null;
         }, 350);
       }
+    } else {
+      try { alert('请先返回章节首页（点左上角 ◀），再双击顶部 ↺ 重置按钮清空全部进度。'); } catch(_) {}
     }
   });
 
   // 云端同步设置按钮（⚙️ 右上角齿轮）
-  el('settingsBtn')?.addEventListener('click', () => {
-    if (window.RuanKaoSync) window.RuanKaoSync.openSettingsModal();
-    else alert('☁️ 云端同步模块加载失败，请刷新页面（或检查 gist-client.js 是否加载）。');
+  safeClick(el('settingsBtn'), '打开云端同步设置', function () {
+    if (window.RuanKaoSync) try { window.RuanKaoSync.openSettingsModal(); } catch(err) { boot && boot.log('FAIL open settings', err && err.message); throw err; }
+    else alert('☁️ 云端同步模块加载失败，请 Ctrl+Shift+R 强制刷新页面（或检查 gist-client.js 是否能加载）。');
   });
 
   // 键盘快捷键（桌面可选）
@@ -1243,26 +1295,76 @@ function bindEvents() {
       }
     }
   });
+
+  // 【关键】监听 gist-client.js 发送的「书签配置已自动应用」事件，
+  // autoconf=1 成功后强制切回首页章节列表视图（避免停在收藏夹/错题本空视图 → 用户误以为"无法刷题"）
+  window.addEventListener('ruankao:cfg-applied', function (ev) {
+    try {
+      const need = ev && ev.detail && ev.detail.needSwitchHome;
+      if (need && typeof switchView === 'function') {
+        boot && boot.log('EVT ruankao:cfg-applied → switchView(home)', ev.detail && ev.detail.gistId ? 'gist=' + String(ev.detail.gistId).slice(0,8) : '');
+        switchView('home');
+      }
+    } catch (err) {
+      console.error('[cfg-applied handler]', err);
+      boot && boot.log('FAIL cfg-applied handler', err && err.message);
+    }
+  });
+
+  // 首屏默认视图兜底：如果 State.view 非 home（比如历史状态残留），强制重置 home
+  if (State.view !== 'home') {
+    boot && boot.log('bindEvents → view defaulted to home from', String(State.view));
+    State.view = 'home';
+  }
+
+  boot && boot.log('bindEvents OK', `listeners registered + cfg-applied handler armed`);
 }
 
 /* ================= 启动 ================= */
 async function main() {
+  const boot = window.__RUANKAO_BOOT;
+  boot && boot.log('20 main() ENTER');
   const loader = el('loader');
   try {
-    if (loader) loader.hidden = false;
+    // 隐藏 loader 的安全写法：同时设置 hidden 属性 + inline style（display:none）
+    // 原因：UA [hidden] 特异性 (0-0-0-0) < .loader { display: flex } (0-0-1-0)，单设 .hidden=true 会被 CSS 覆盖（用户之前 100% 复现了这个 bug）
+    function hideLoader() {
+      if (!loader) return;
+      loader.hidden = true;
+      loader.setAttribute('hidden', '');
+      loader.style.setProperty('display', 'none', 'important');
+    }
+    function showLoader() {
+      if (!loader) return;
+      loader.hidden = false;
+      loader.removeAttribute('hidden');
+      loader.style.setProperty('display', 'flex', 'important');
+      loader.style.flexDirection = 'column';
+      loader.style.alignItems = 'center';
+      loader.style.justifyContent = 'center';
+    }
+
+    if (loader) showLoader();
+    boot && boot.log('21 loadData() start', 'url=' + DATA_URL);
 
     // ⚠️ 【启动顺序修正，核心修复】
     // 第 1 优先级：先加载题库 + 立刻渲染首页！
     //   这样即使云端同步没配置、后端 API 不存在、Gist 连不上，用户也能立刻看到章节列表开始刷题。
     //   （之前先做 pullFromServer，一旦 404/异常，后面永远不会加载题库）
     await loadData();
+    boot && boot.log('22 loadData() OK → bindEvents()');
     bindEvents();
+    boot && boot.log('23 bindEvents() OK → renderHome()');
     renderHome();
+    boot && boot.log('24 renderHome() OK → sections rendered');
 
     // 第 2 优先级：云端同步（失败完全不影响刷题，所有异常 100% 吞掉）
     try {
+      boot && boot.log('25 pullFromServer() start', 'backendLikely=' + !!backendLikelyAvailable());
       await pullFromServer({ applyRenderIfChanged: true });
+      boot && boot.log('26 pullFromServer() done');
     } catch (e) {
+      boot && boot.log('26 pullFromServer() swallowed error', e.name + ': ' + e.message);
       // 无配置、纯静态、GitHub Pages——这些情况静默即可（已经有 localStorage 兜底）
       if (window.RuanKaoSync && !window.RuanKaoSync.hasConfigSaved()) {
         // 用户还没开同步功能，完全正常
@@ -1273,39 +1375,58 @@ async function main() {
 
     // 第 3 优先级：启动实时自动同步循环（同样 try-catch 防崩溃）
     try {
+      boot && boot.log('27 startAutoSyncLoop()');
       startAutoSyncLoop();
     } catch (e) {
+      boot && boot.log('27 startAutoSyncLoop() swallowed error', e.name + ': ' + e.message);
       console.warn('[startup] 自动同步循环启动失败（仅不支持跨设备）：', e.message);
     }
+    boot && boot.log('30 main() SUCCESS - loader will be hidden now');
   } catch (e) {
+    boot && boot.log('FAIL main()', e.name + ': ' + e.message);
     console.error(e);
     const host = location?.host || '';
     const byFile = /^file:|^[a-zA-Z]:/.test(location?.href || '');
     if (loader) {
       loader.innerHTML = `
         <div style="color:#d9656f;font-weight:600">⚠️ 应用启动失败</div>
-        <div style="max-width:420px;text-align:center;line-height:1.8;color:#4a5a7a;font-size:14px">
-          ${byFile
-            ? `<b>不要用 file:// 直接打开 HTML</b>，否则题库加载会被浏览器安全策略拦截。<br/>请在项目根目录运行：<br/><code style="background:#eef3ff;padding:2px 8px;border-radius:6px">node scripts/server.js</code><br/>或访问上面的公网 GitHub Pages 链接。`
-            : `错误原因：<code style="font-size:12px;color:#d9656f">${escapeHtml(e.message || String(e))}</code><br/><br/>
-               👉 如果显示 "HTTP 404/加载题库失败"：请按 <b>Ctrl+Shift+R</b>（Mac：Cmd+Shift+R）强制刷新跳过缓存。<br/>
-               👉 如果还是不行：直接访问公网地址 <b style="word-break:break-all">https://r676767.github.io/ruankao/</b>`
-          }
+        <div style="max-width:560px;text-align:left;line-height:1.8;color:#4a5a7a;font-size:14px;background:#fff7d6;border:1px solid #ffe6a0;padding:14px 16px;border-radius:8px;margin-top:8px">
+          <b style="color:#a05513">请把下面红色错误信息截图发我 → 10 秒解决</b><br/>
+          <code style="font-size:12px;color:#d93025;word-break:break-all">${e.name}: ${escapeHtml(e.message || String(e))}</code><br/>
+          <div style="margin-top:10px;font-size:13px;color:#5a5a5a">
+            ${byFile
+              ? `⚠️ 不要用 file:// 直接打开 HTML，浏览器安全策略会拦截 fetch。<br/>请运行 <code style="background:#eef3ff;padding:2px 8px;border-radius:6px">node scripts/server.js</code> 再访问 <code>http://localhost:8080/</code>`
+              : `👉 临时救急方案：① <b>Ctrl+Shift+R</b> 强制刷新清缓存  ② 或关光黑窗后重新双击 bat  ③ 或公网备用：<b style="word-break:break-all">https://r676767.github.io/ruankao/</b>`
+            }
+          </div>
         </div>
       `;
+      showLoader(); // 失败时需要显示错误框在 loader 里，不能隐藏
     }
+    try {
+      alert('启动失败：' + e.name + '\n' + e.message + '\n\n把页面上的红色框内容截图发我，或者直接 Ctrl+Shift+R 强制刷新清缓存再试。');
+    } catch(_) {}
     return;
   } finally {
     // 无论成功失败，一定会关闭 loader（绝对不允许永远"正在加载题库..."）
-    if (loader) loader.hidden = true;
+    // 三重保险：hidden 属性 + setAttribute + inline style !important display:none
+    // （之前 UA [hidden] 特异性输给 .loader { display: flex } 导致 loader 永远显示的致命 bug 彻底修复）
+    boot && boot.log('FINALLY -> closing loader (hidden attr + setAttribute + inline display:none !important)');
+    hideLoader();
   }
 }
 
 // 仅在 document 已就绪时启动
 if (typeof document !== 'undefined') {
+  const boot = window.__RUANKAO_BOOT;
+  boot && boot.log('15 app.js evaluated -> main() schedule ready');
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', main);
+    document.addEventListener('DOMContentLoaded', function () {
+      boot && boot.log('18 DOMContentLoaded -> calling main()');
+      main();
+    });
   } else {
+    boot && boot.log('18 readyState=' + document.readyState + ' -> calling main() immediately');
     main();
   }
 }

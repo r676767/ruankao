@@ -23,3 +23,11 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# 个人私有启动脚本（含 GitHub PAT，永远不进 git）
+桌面快捷-软考刷题*.bat
+一键启动软考刷题*.bak
+.defaults.json
+.gist-info.json
+.tmp/
+.data/
