@@ -48,11 +48,26 @@ const MIME = {
 function getLanIPs() {
   const nets = os.networkInterfaces();
   const ips = [];
+  // 常见虚拟网卡关键词（Hyper-V/VMware/VirtualBox/WSL/蓝牙/环回/APIPA），避免把它们的 IP 打印给用户导致"能连上但实际上TCP卡死"
+  const VIRTUAL_KEYWORDS = /Hyper-V|Virtual|VMware|VirtualBox|WSL|Bluetooth|Loopback|Teredo|6TO4|ISATAP|Bridge|桥接|Bridge Network|Miniport|Wi-Fi Direct|Direct Access|Pseudo-Interface|TAP-Windows|TAP-Win|Docker|vEthernet/i;
   for (const k of Object.keys(nets)) {
+    // 先根据网卡名过滤掉绝大多数虚拟网卡
+    if (VIRTUAL_KEYWORDS.test(k)) continue;
     for (const n of nets[k] || []) {
-      if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
+      if (n.family !== 'IPv4' || n.internal) continue;
+      const ip = n.address;
+      // 根据 IPv4 段再过滤一层：169.254.x.x (APIPA 未分配) / 192.168.207.x (Hyper-V默认) / 172.17/18/19.x (Docker常见)
+      if (/^169\.254\./.test(ip)) continue;
+      if (/^192\.168\.207\./.test(ip)) continue;
+      if (/^172\.(17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)\./.test(ip)) continue;
+      // 过滤掉明显是"仅主机适配器/虚拟交换机"的特殊段（优先级较低的段），仅保留 C 类家用路由器典型段 + 10.0.0.0/8（大内网）+ 172.16.x.x（企业网）
+      const isPrivate = /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.16\./.test(ip);
+      if (!isPrivate) continue;
+      ips.push(ip);
     }
   }
+  // 如果过滤后 IP 为 0（说明用户没真实网卡/未联网），兜底：返回 127.0.0.1 让用户别迷茫
+  if (ips.length === 0) ips.push('127.0.0.1');
   return ips;
 }
 
@@ -298,9 +313,15 @@ const server = http.createServer((req, res) => {
     console.log('============================================');
     console.log('  系规刷题应用 已启动 ✅');
     console.log('============================================');
-    console.log(`  本机访问:   http://localhost:${PORT}`);
-    for (const ip of getLanIPs()) {
-      console.log(`  局域网访问: http://${ip}:${PORT}   （手机同WiFi可用）`);
+    console.log(`  本机访问⭐: http://localhost:${PORT}    👉 （最推荐！本机回环 100% 必达·不经过虚拟网卡）`);
+    const lans = getLanIPs();
+    const realLans = lans.filter(ip => ip !== '127.0.0.1');
+    if (realLans.length > 0) {
+      for (const ip of realLans) {
+        console.log(`  手机同WiFi: http://${ip}:${PORT}   （手机/平板跨设备）`);
+      }
+    } else {
+      console.log(`  手机同WiFi: 未检测到可用局域网 IP，请连 WiFi/网线后重启`);
     }
     console.log('--------------------------------------------');
     console.log(`  数据: ${qCount.n} 道题 · ${qCount.chapterN} 章`);
@@ -310,6 +331,7 @@ const server = http.createServer((req, res) => {
     } else if (storage.kind === 'gist') {
       console.log('  进度/错题 GitHub Gist 持久化，Vercel 部署重启也不丢（0 元免费实时同步）');
     }
+    console.log('  ⚠️  请勿访问 192.168.207.x / VMware / Hyper-V 等虚拟IP：跨子网会卡死"正在加载题库..."');
     console.log('  按 Ctrl + C 停止服务');
     console.log('============================================');
   });
