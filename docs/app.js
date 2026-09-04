@@ -496,6 +496,12 @@ function updateContinueBtn() {
 /* ================= 进入章节/小节 ================= */
 function enterChapter(chapterId) {
   const boot = window.__RUANKAO_BOOT;
+  // 进入章节前先把可能盖着的同步 Modal 关掉（避免用户截图中叠了 3 层 Modal 点不了节卡片）
+  try {
+    if (typeof window.RuanKaoSync !== 'undefined' && typeof window.RuanKaoSync.hideAllOverlays === 'function') {
+      window.RuanKaoSync.hideAllOverlays();
+    }
+  } catch {}
   const ch = State.data.chapters.find(c => c.id === chapterId);
   if (!ch) {
     boot && boot.log('enterChapter WARN chapter not found', `chapterId=${chapterId}`);
@@ -616,6 +622,7 @@ function switchView(name, ctx) {
   const boot = window.__RUANKAO_BOOT;
   boot && boot.log('switchView', String(name) + (ctx ? ' ctx=' + JSON.stringify(ctx) : ''));
   State.view = name;
+  try { if (document.body) document.body.setAttribute('data-view', String(name)); } catch {}
   setHidden('homeView', name !== 'home');
   setHidden('quizView', name !== 'quiz');
   setHidden('wrongView', name !== 'wrong');
@@ -879,6 +886,8 @@ function goNext() {
 /* ================= 答题卡 ================= */
 function openSheet() {
   if (!State.current) return;
+  // 答题卡打开前先把同步设置 Modal 关掉，避免层级重叠用户看不见答题卡
+  try { if (typeof window.RuanKaoSync !== 'undefined' && window.RuanKaoSync.closeSettingsModal) window.RuanKaoSync.closeSettingsModal(); } catch {}
   const qlist = State.current.questions;
 
   setText('sheetTitle', `答题卡 · ${qlist.length}题`);
@@ -913,6 +922,9 @@ function openSheet() {
     grid.appendChild(cell);
   }
 
+  // 答题卡 z-index 明确 = 92/93（高于同步设置 Modal 90/91）= 用户在答题页能放心点开答题卡不会被同步Modal盖住
+  try { el('sheetMask').style.zIndex = '92'; } catch {}
+  try { el('sheet').style.zIndex = '93'; } catch {}
   setHidden('sheetMask', false);
   setHidden('sheet', false);
 }

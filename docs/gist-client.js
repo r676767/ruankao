@@ -282,8 +282,8 @@
 
   /* ---------------- 6. Settings Modal UI（自动注入 HTML+事件） ---------------- */
   const MODAL_HTML = `
-  <div class="sheet-mask" id="rcSyncMask" hidden style="z-index:50"></div>
-  <aside class="sheet" id="rcSyncModal" hidden style="z-index:51;max-width:560px">
+  <div class="sheet-mask" id="rcSyncMask" hidden style="z-index:90;backdrop-filter:blur(2px)"></div>
+  <aside class="sheet" id="rcSyncModal" hidden style="z-index:91;max-width:560px;max-height:90dvh;overflow:auto">
     <div class="sheet-header">
       <div class="sheet-title">☁️ 云端同步设置</div>
       <button class="icon-btn" id="rcSyncClose" aria-label="关闭">
@@ -299,8 +299,8 @@
         </div>
         <div>
           <div style="font-weight:600;font-size:14px;margin-bottom:4px">GitHub Token（只勾选 gist 权限的 Classic PAT）</div>
-          <input id="rcGhToken" type="password" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="github_pat_.....（只勾选 gist 权限）" spellcheck="false" autocomplete="off" />
-          <div style="margin-top:6px;font-size:12px;color:#64748b">
+          <input id="rcGhToken" type="text" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="github_pat_.....（只勾选 gist 权限）" spellcheck="false" autocomplete="off" />
+          <div style="margin-top:6px;font-size:12px;color:#64748b" id="rcDefaultsHint">
             生成地址：<a href="https://github.com/settings/tokens/new?scopes=gist&description=ruankao-quiz-sync" target="_blank" rel="noopener">github.com/settings/tokens/new → 只勾 gist</a>
           </div>
         </div>
@@ -323,26 +323,56 @@
     while (wrap.content.firstChild) target.appendChild(wrap.content.firstChild);
     // 绑定事件
     const $ = (id) => document.getElementById(id);
-    const mask = $('rcSyncMask'), modal = $('rcSyncModal');
-    const close = () => { mask.hidden = true; modal.hidden = true; $('rcSyncResult').textContent = ''; };
+    const close = () => {
+      try {
+        const mask = $('rcSyncMask'), modal = $('rcSyncModal');
+        if (mask) mask.hidden = true;
+        if (modal) modal.hidden = true;
+        $('rcSyncResult').textContent = '';
+      } catch {}
+    };
+    // 关闭所有可能盖在首页的浮层（章节选择 sheet / 答题卡 sheet / 同步 Modal）
+    const hideAllOverlays = () => {
+      try {
+        ['rcSyncMask','rcSyncModal','sheetMask','sheet'].forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.hidden = true;
+        });
+      } catch {}
+    };
     const open = () => {
       ensureModalInDOM();
+      // 打开前先把别的弹层关掉（避免叠层用户看到两个 ×）
+      try {
+        ['sheetMask','sheet'].forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.hidden = true;
+        });
+      } catch {}
       const cfg = loadCfg();
       $('rcGistId').value = cfg?.gistId || '';
       $('rcGhToken').value = cfg?.ghToken || '';
       updateTip();
       $('rcSyncResult').textContent = '';
-      mask.hidden = false; modal.hidden = false;
+      $('rcSyncMask').hidden = false;
+      $('rcSyncModal').hidden = false;
+      // 自动聚焦 Gist ID，方便手机输入
+      try { setTimeout(() => $('rcGistId').focus({ preventScroll: true }), 60); } catch {}
     };
     $('rcSyncClose')?.addEventListener('click', close);
-    mask?.addEventListener('click', close);
+    $('rcSyncMask')?.addEventListener('click', (e) => { if (e.target === $('rcSyncMask')) close(); });
     $('rcSyncSave')?.addEventListener('click', () => {
       const gistId = $('rcGistId').value.trim();
       const token = $('rcGhToken').value.trim();
       if (!gistId || !token) { showResult('❌ 请同时填写 GIST_ID 和 GitHub Token', 'err'); return; }
       saveCfg({ gistId, ghToken: token });
-      showResult('✅ 已保存。跨设备只需填写相同的 GIST_ID + Token 即可实时同步。', 'ok');
+      showResult('✅ 已保存！跨设备只需填相同的 GIST_ID + Token，5 秒级实时同步。', 'ok');
       updateTip();
+      // 保存成功后 dispatch cfg-applied → 自动切首页 + 关 Modal（用户反馈「输入后也无法使用」→ 保存后需要立刻让进度同步生效）
+      try {
+        if (typeof window.dispatchEvent === 'function') {
+          window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId, ghToken: token, fromSaveBtn: true, needSwitchHome: true } }));
+        }
+      } catch {}
+      setTimeout(() => { hideAllOverlays(); }, 600);
     });
     $('rcSyncTest')?.addEventListener('click', async () => {
       const gistId = $('rcGistId').value.trim();
@@ -351,16 +381,16 @@
       const prev = loadCfg();
       saveCfg({ gistId, ghToken: token });
       const r = $('rcSyncResult');
-      r.textContent = '⏳ 正在连接 GitHub Gist…';
+      r.textContent = '⏳ 正在连接 GitHub Gist（国内可能 5-10 秒，请耐心等待）…';
       r.style.background = '#fff7ed'; r.style.color = '#92400e';
       try {
         const c = new GistClient({ ghToken: token, gistId });
         const u = await c.load();
         const desc = await c.describe();
         const doneCnt = Object.keys(u.progress || {}).length;
-        showResult(`✅ 连接成功！${desc}\n   当前 Gist 中已有答题记录 ${doneCnt} 道。保存配置后跨设备即可互通。`, 'ok');
+        showResult(`✅ 连接成功！${desc}\n   当前 Gist 中已有答题记录 ${doneCnt} 道。保存后跨设备互通。`, 'ok');
       } catch (e) {
-        showResult('❌ ' + (e.message || String(e)), 'err');
+        showResult('❌ ' + (e.message || String(e)) + '\n   → 常见原因：① Token 已过期 ② 网络拦截 GitHub ③ Token 没勾 gist 权限', 'err');
         if (prev) saveCfg(prev); else clearCfg(); // 恢复原配置
       }
     });
@@ -368,12 +398,13 @@
       if (!confirm('确定清空云端同步配置？（不会清空本地进度或 Gist 中的数据）')) return;
       clearCfg();
       $('rcGistId').value = ''; $('rcGhToken').value = '';
-      showResult('已清空配置。', 'warn');
+      showResult('已清空配置。再次启用可使用【一键启用同步书签 URL】。', 'warn');
       updateTip();
     });
     // 把 open/close 绑到闭包
     RuanKaoSync.openSettingsModal = open;
     RuanKaoSync.closeSettingsModal = close;
+    RuanKaoSync.hideAllOverlays = hideAllOverlays;
     return true;
   }
   function showResult(msg, type = 'info') {
@@ -404,23 +435,44 @@
     return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
 
-  /* ---------------- 8. 书签 URL 自动配置（gh_token / gist_id / autoconf hash 传参） ---------------- */
-  function parseHashParams() {
-    const hash = (typeof location !== 'undefined' && location.hash) || '';
-    if (!hash || hash.length < 2) return {};
-    const out = {};
-    for (const part of hash.slice(1).split('&')) {
-      if (!part) continue;
-      const idx = part.indexOf('=');
-      const k = idx === -1 ? part : part.slice(0, idx);
-      const v = idx === -1 ? '' : decodeURIComponent(part.slice(idx + 1).replace(/\+/g, ' '));
-      out[String(k).toLowerCase().trim()] = v;
-    }
-    return out;
+  /* ---------------- 8. 书签 URL 自动配置（query + hash 双通道 + 1 字母短别名，手机微信跳转不丢参数） ---------------- */
+  function parseAllParams() {
+    try {
+      const out = {};
+      const rawSearch = (typeof location !== 'undefined' && location.search) || '';
+      const rawHash = (typeof location !== 'undefined' && location.hash) || '';
+      // 双通道：先解析 query string（?a=1&t=…&g=…），再解析 hash（#a=1&t=…&g=…），后者覆盖前者
+      const searchStr = rawSearch.startsWith('?') ? rawSearch.slice(1) : rawSearch;
+      const hashStr = rawHash.startsWith('#') ? rawHash.slice(1) : rawHash;
+      const toParse = [];
+      if (searchStr) toParse.push(searchStr);
+      if (hashStr) toParse.push(hashStr);
+      for (const str of toParse) {
+        try {
+          // 优先用 URLSearchParams 原生（100% 正确解码 URL encode 后的 Token）
+          const sp = new URLSearchParams(str);
+          for (const [k, v] of sp.entries()) {
+            const key = String(k).toLowerCase().trim();
+            if (!key) continue;
+            out[key] = (v == null) ? '' : String(v);
+          }
+          continue;
+        } catch {}
+        // fallback: 手动 split
+        for (const part of str.split('&')) {
+          if (!part) continue;
+          const idx = part.indexOf('=');
+          const k = idx === -1 ? part : part.slice(0, idx);
+          const v = idx === -1 ? '' : decodeURIComponent(part.slice(idx + 1).replace(/\+/g, ' '));
+          out[String(k).toLowerCase().trim()] = v;
+        }
+      }
+      return out;
+    } catch { return {}; }
   }
   function pickParam(params, keys) {
     for (const k of keys) {
-      const v = params[k.toLowerCase()];
+      const v = params[String(k).toLowerCase()];
       if (v != null && v !== '') return v;
     }
     return '';
@@ -439,28 +491,34 @@
   }
   function autoApplyFromURL() {
     try {
-      const params = parseHashParams();
+      const params = parseAllParams();
       if (!params || Object.keys(params).length === 0) return;
-      const token = pickParam(params, ['gh_token', 'token', 'ghtoken', 'ghToken', 'GH_TOKEN']);
-      const gid = pickParam(params, ['gist_id', 'gistid', 'gistId', 'GIST_ID', 'gist']);
+      // 支持 1 字母短别名 t=token, g=gist, a=autoconf，避免 URL 太长被手机微信截断
+      const token = pickParam(params, ['t','gh_token', 'token', 'ghtoken', 'ghToken', 'GH_TOKEN']);
+      const gid   = pickParam(params, ['g','gist_id', 'gistid',   'gistId',  'GIST_ID', 'gist']);
       if (!token || !gid) return; // 书签里没有完整参数，直接跳过
-      const autoconf = ['1','true','yes','on'].includes(String(pickParam(params,['autoconf','auto','apply','save'])).toLowerCase());
+      const autoconf = ['1','true','yes','on'].includes(String(pickParam(params, ['a','autoconf','auto','apply','save'])).toLowerCase());
       ensureModalInDOM();
       if (autoconf) {
         // 自动写入 localStorage，打开即进入同步模式
         saveCfg({ gistId: gid.trim(), ghToken: token.trim() });
-        showTopToast('✅ 书签已自动启用跨设备同步（Gist ' + gid.trim().slice(0, 8) + '…），右上角⚙️可查看/修改', 'ok');
-        // 【关键】自动关 Modal + 通知 app.js 切到首页章节列表（防止用户还停留在收藏夹/错题本空视图或 Modal 覆盖首页导致「无法刷题」）
-        try { RuanKaoSync.closeSettingsModal(); } catch {}
+        showTopToast('✅ 跨设备同步已自动启用（Gist ' + gid.trim().slice(0, 8) + '…），进度5秒互通；右上角⚙️可查看配置', 'ok');
+        // 【隐私】立即替换浏览器 URL，去掉地址栏的 Token / Gist（刷新仍保留在 localStorage，不泄露）
         try {
-          if (typeof window.RKNotifyHashApplied === 'function') window.RKNotifyHashApplied({ gistId: gid.trim(), ghToken: token.trim() });
-        } catch {}
-        try {
-          if (typeof window.dispatchEvent === 'function') {
-            window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: gid.trim(), ghToken: token.trim(), needSwitchHome: true } }));
+          if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+            history.replaceState(null, document.title || '', (location.pathname || '/'));
           }
         } catch {}
-        // DOM 里还有任何别的 mask / sheet（答题卡/章节选择/Modal mask）残留，全部尝试兜底隐藏
+        // 【关键】自动关 Modal + 通知 app.js 切到首页章节列表
+        try { if (RuanKaoSync.closeSettingsModal) RuanKaoSync.closeSettingsModal(); } catch {}
+        try { if (RuanKaoSync.hideAllOverlays)     RuanKaoSync.hideAllOverlays(); } catch {}
+        try { if (typeof window.RKNotifyHashApplied === 'function') window.RKNotifyHashApplied({ gistId: gid.trim(), ghToken: token.trim() }); } catch {}
+        try {
+          if (typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('ruankao:cfg-applied', { detail: { gistId: gid.trim(), ghToken: token.trim(), fromURL: true, needSwitchHome: true } }));
+          }
+        } catch {}
+        // DOM 里任何别的 mask / sheet 残留全部兜底隐藏
         try {
           ['rcSyncMask','rcSyncModal','sheetMask','sheet'].forEach(function(id){
             var el = document.getElementById(id); if (el) el.hidden = true;
@@ -480,11 +538,11 @@
               document.getElementById('rcGistId').value = gid.trim();
               document.getElementById('rcGhToken').value = token.trim();
             } catch {}
-            showTopToast('💡 书签已自动填入配置，请点【保存并启用】或先【测试连接】确认', 'warn');
+            showTopToast('💡 配置已预填，请点【保存并启用】或先【测试连接】确认', 'warn');
           } else {
             showTopToast('💡 书签已预填配置（右上角⚙️可查看/保存），现有配置优先级更高', 'ok');
           }
-        }, 300);
+        }, 250);
       }
     } catch (e) { /* 书签解析失败无副作用 */ console.warn('[gist-client] autoApplyFromURL failed:', e); }
   }
